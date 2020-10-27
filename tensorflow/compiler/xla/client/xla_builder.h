@@ -648,18 +648,28 @@ class XlaBuilder {
                      absl::Span<const int64> window_dimensions,
                      absl::Span<const int64> window_strides, Padding padding);
 
+  XlaOp ReduceWindow(absl::Span<const XlaOp> operands,
+                     absl::Span<const XlaOp> init_values,
+                     const XlaComputation& computation,
+                     absl::Span<const int64> window_dimensions,
+                     absl::Span<const int64> window_strides, Padding padding);
+
   XlaOp ReduceWindowWithGeneralPadding(
-      XlaOp operand, XlaOp init_value, const XlaComputation& computation,
+      absl::Span<const XlaOp> operands, absl::Span<const XlaOp> init_values,
+      const XlaComputation& computation,
       absl::Span<const int64> window_dimensions,
       absl::Span<const int64> window_strides,
       absl::Span<const int64> base_dilations,
       absl::Span<const int64> window_dilations,
       absl::Span<const std::pair<int64, int64>> padding);
-
+  StatusOr<XlaOp> ReduceWindowInternal(const Shape& shape,
+                                       absl::Span<const XlaOp> operands,
+                                       absl::Span<const XlaOp> init_values,
+                                       const XlaComputation& computation,
+                                       Window window);
   virtual StatusOr<XlaOp> ReduceWindowInternal(
       const Shape& shape, XlaOp operand, XlaOp init_value,
       const XlaComputation& computation, Window window);
-
   XlaOp CrossReplicaSum(XlaOp operand,
                         absl::Span<const ReplicaGroup> replica_groups = {});
 
@@ -842,9 +852,10 @@ class XlaBuilder {
                  absl::optional<ComparisonDirection> direction = absl::nullopt,
                  absl::optional<Comparison::Type> type = absl::nullopt);
 
+  StatusOr<XlaOp> Compare(const Shape& shape, XlaOp lhs, XlaOp rhs,
+                          ComparisonDirection direction);
+
   // Internal helper method for binary op compare without broadcast dimensions.
-  virtual StatusOr<XlaOp> Compare(const Shape& shape, XlaOp lhs, XlaOp rhs,
-                                  ComparisonDirection direction);
   virtual StatusOr<XlaOp> Compare(const Shape& shape, XlaOp lhs, XlaOp rhs,
                                   ComparisonDirection direction,
                                   Comparison::Type type);
@@ -1133,6 +1144,12 @@ class XlaBuilder {
   friend XlaOp ReduceAll(XlaOp operand, XlaOp init_value,
                          const XlaComputation& computation);
   friend XlaOp ReduceWindow(XlaOp operand, XlaOp init_value,
+                            const XlaComputation& computation,
+                            absl::Span<const int64> window_dimensions,
+                            absl::Span<const int64> window_strides,
+                            Padding padding);
+  friend XlaOp ReduceWindow(absl::Span<const XlaOp> operands,
+                            absl::Span<const XlaOp> init_values,
                             const XlaComputation& computation,
                             absl::Span<const int64> window_dimensions,
                             absl::Span<const int64> window_strides,
@@ -1961,6 +1978,12 @@ XlaOp ReduceAll(XlaOp operand, XlaOp init_value,
 
 // Enqueues a windowed reduce instruction onto the computation.
 XlaOp ReduceWindow(XlaOp operand, XlaOp init_value,
+                   const XlaComputation& computation,
+                   absl::Span<const int64> window_dimensions,
+                   absl::Span<const int64> window_strides, Padding padding);
+
+XlaOp ReduceWindow(absl::Span<const XlaOp> operands,
+                   absl::Span<const XlaOp> init_values,
                    const XlaComputation& computation,
                    absl::Span<const int64> window_dimensions,
                    absl::Span<const int64> window_strides, Padding padding);

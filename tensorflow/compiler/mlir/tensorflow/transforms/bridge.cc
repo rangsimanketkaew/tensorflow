@@ -51,7 +51,10 @@ void AddGraphExportLoweringPasses(OpPassManager &pm) {
   pm.addPass(TFDevice::CreateReplicateToIslandPass());
   pm.addPass(CreateBreakUpIslandsPass());
   add_pass(TFDevice::CreateParallelExecuteToIslandsPass());
-  add_pass(TFDevice::CreateLaunchToDeviceAttributePass());
+  pm.addPass(TFDevice::CreateLaunchToDeviceAttributePass());
+  pm.addPass(CreateBreakUpIslandsPass());
+  pm.addNestedPass<FuncOp>(CreateTPUDevicePropagationPass());
+  pm.addPass(createSymbolDCEPass());
 }
 
 tensorflow::Status RunTPUBridge(
@@ -120,7 +123,6 @@ void CreateTPUBridgePipeline(OpPassManager &pm) {
   pm.addPass(createSymbolDCEPass());
   pm.addNestedPass<FuncOp>(TFDevice::CreateReplicateInvariantOpHoistingPass());
   pm.addNestedPass<FuncOp>(CreateTPUDynamicLayoutPass());
-  pm.addNestedPass<FuncOp>(CreateTPUParallelExecuteSinkResourceWritePass());
   pm.addNestedPass<FuncOp>(CreateTPUMergeVariablesWithExecutePass());
   pm.addNestedPass<FuncOp>(CreateTPUColocateCompositeResourceOps());
   pm.addPass(CreateTPUVariableReformattingPass());

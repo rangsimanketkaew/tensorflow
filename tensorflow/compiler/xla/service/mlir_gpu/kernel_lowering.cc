@@ -35,7 +35,7 @@ limitations under the License.
 #include "mlir/IR/Dialect.h"  // from @llvm-project
 #include "mlir/Pass/Pass.h"  // from @llvm-project
 #include "mlir/Pass/PassManager.h"  // from @llvm-project
-#include "mlir/Transforms/BufferPlacement.h"  // from @llvm-project
+#include "mlir/Transforms/Bufferize.h"  // from @llvm-project
 #include "mlir/Transforms/Passes.h"  // from @llvm-project
 #include "tensorflow/compiler/mlir/hlo/include/mlir-hlo/Dialect/mhlo/IR/lhlo_ops.h"
 #include "tensorflow/compiler/mlir/hlo/include/mlir-hlo/Dialect/mhlo/transforms/passes.h"
@@ -70,7 +70,8 @@ Status LowerLHLOToGPU(mlir::ModuleOp module, LowerLHLOToGPUOptions options) {
   // Legalize from HLO to LHLO.
   pm.addPass(::mlir::mhlo::createLegalizeToLhloPass());
   // Moving `AllocOp`s and inserting missing `DeallocOp`s
-  pm.addPass(::mlir::createBufferPlacementPass());
+  pm.addPass(::mlir::createBufferHoistingPass());
+  pm.addPass(::mlir::createBufferDeallocationPass());
   // Next, we can strip the outer fusion operation.
   pm.addPass(createFusionOpRemoverPass());
   // Remove unnecessary LHLO copies.
@@ -125,8 +126,6 @@ Status LowerLHLOToGPU(mlir::ModuleOp module, LowerLHLOToGPUOptions options) {
     pm.addNestedPass<::mlir::FuncOp>(
         ::mlir::mhlo::createLegalizeTrigonometricToApproximationPass());
   }
-  // Move scalar operations into the launch to ensure smaller signatures.
-  pm.addPass(createMoveScalarComputationsIntoGpuLaunchPass());
   // Take launches to launches with kernels.
   pm.addPass(::mlir::createGpuKernelOutliningPass());
   // Make sure the kernel signature resembled the original function's

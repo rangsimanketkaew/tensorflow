@@ -18,6 +18,7 @@ from __future__ import division
 from __future__ import print_function
 
 import functools
+import os
 import warnings
 
 from absl.testing import parameterized
@@ -223,6 +224,65 @@ class OptimizeDatasetTest(test_base.DatasetTestBase, parameterized.TestCase):
       dataset = dataset.with_options(options)
 
     self.assertDatasetProduces(dataset, expected_output=expected_output)
+
+  @combinations.generate(
+      combinations.times(
+          test_base.default_test_combinations(),
+          combinations.combine(autotune=False, autotune_buffers=False) +
+          combinations.combine(autotune=True, autotune_buffers=False) +
+          combinations.combine(autotune=True, autotune_buffers=True),
+          combinations.combine(set_env=[False, True])))
+  def testOptimizationEnableGradientDescent(self, autotune, autotune_buffers,
+                                            set_env):
+    if set_env:
+      os.environ["TF_DATA_EXPERIMENT_OPT_IN"] = "enable_gradient_descent"
+      os.environ["TF_JOB_NAME"] = "test_job"
+
+    dataset = dataset_ops.Dataset.range(5)
+    dataset = dataset.prefetch(buffer_size=-1)
+    dataset = dataset.map(lambda x: x + 1, num_parallel_calls=2)
+    dataset = dataset.map(lambda x: x + 1, num_parallel_calls=-1)
+    dataset = dataset.prefetch(buffer_size=3)
+    dataset = dataset.map(lambda x: x + 1, num_parallel_calls=-1)
+    dataset = dataset.prefetch(buffer_size=1)
+
+    options = dataset_ops.Options()
+    options.experimental_optimization.autotune = autotune
+    options.experimental_optimization.autotune_buffers = autotune_buffers
+    dataset = dataset.with_options(options)
+
+    self.assertDatasetProduces(dataset, expected_output=list(range(3, 8)))
+
+    if set_env:
+      del os.environ["TF_DATA_EXPERIMENT_OPT_IN"]
+      del os.environ["TF_JOB_NAME"]
+
+  @combinations.generate(
+      combinations.times(
+          test_base.default_test_combinations(),
+          combinations.combine(autotune=[True, False]),
+          combinations.combine(set_env=[True, False])))
+  def testOptimizationMapParallelization(self, autotune, set_env):
+    if set_env:
+      os.environ["TF_DATA_EXPERIMENT_OPT_IN"] = "map_parallelization"
+      os.environ["TF_JOB_NAME"] = "test_job"
+
+    dataset = dataset_ops.Dataset.range(5)
+    if autotune and set_env:
+      dataset = dataset.apply(testing.assert_next(["ParallelMap"]))
+    else:
+      dataset = dataset.apply(testing.assert_next(["Map"]))
+    dataset = dataset.map(lambda x: x + 1)
+
+    options = dataset_ops.Options()
+    options.experimental_optimization.autotune = autotune
+    dataset = dataset.with_options(options)
+
+    self.assertDatasetProduces(dataset, expected_output=list(range(1, 6)))
+
+    if set_env:
+      del os.environ["TF_DATA_EXPERIMENT_OPT_IN"]
+      del os.environ["TF_JOB_NAME"]
 
   @combinations.generate(
       combinations.times(
