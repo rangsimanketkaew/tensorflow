@@ -10,8 +10,10 @@ package(
         "//tensorflow/core:__pkg__",
         # tensorflow/core/platform:monitoring depends on this package
         "//tensorflow/core/platform:__subpackages__",
+        # tensorflow/compiler/xla/pjrt:metrics depends on this package
+        "//tensorflow/compiler/xla/pjrt:__subpackages__",
     ],
-    licenses = ["notice"],  # Apache 2.0
+    licenses = ["notice"],
 )
 
 # Todo(bmzhao): Remaining targets to add are: all tests.
@@ -113,7 +115,8 @@ cc_library(
 
 cc_library(
     name = "mobile_counter",
-    hdrs = ["mobile_counter.h"],
+    textual_hdrs = ["mobile_counter.h"],
+    visibility = ["//visibility:private"],
     deps = [
         "//tensorflow/core/lib/core:status",
         "//tensorflow/core/platform:macros",
@@ -123,7 +126,8 @@ cc_library(
 
 cc_library(
     name = "mobile_gauge",
-    hdrs = ["mobile_gauge.h"],
+    textual_hdrs = ["mobile_gauge.h"],
+    visibility = ["//visibility:private"],
     deps = [
         "//tensorflow/core/lib/core:status",
         "//tensorflow/core/platform:macros",
@@ -133,7 +137,8 @@ cc_library(
 
 cc_library(
     name = "mobile_sampler",
-    hdrs = ["mobile_sampler.h"],
+    textual_hdrs = ["mobile_sampler.h"],
+    visibility = ["//visibility:private"],
     deps = [
         ":metric_def",
         "//tensorflow/core/framework:summary_proto_cc",
@@ -163,7 +168,8 @@ cc_library(
 
 cc_library(
     name = "mobile_percentile_sampler",
-    hdrs = ["mobile_percentile_sampler.h"],
+    textual_hdrs = ["mobile_percentile_sampler.h"],
+    visibility = ["//visibility:private"],
     deps = [
         ":collection_registry",
         ":metric_def",
@@ -200,7 +206,9 @@ filegroup(
         "metric_def.h",
         "mobile_counter.h",
         "mobile_gauge.h",
+        "mobile_percentile_sampler.h",
         "mobile_sampler.h",
+        "percentile_sampler.h",
         "sampler.h",
         "timed.h",
         "types.h",

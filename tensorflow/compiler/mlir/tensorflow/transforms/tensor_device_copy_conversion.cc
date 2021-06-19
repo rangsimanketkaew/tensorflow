@@ -13,57 +13,85 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+// This pass folds the tf.Identity op if the operation has the same device as
+// its operand.
+
 #include "mlir/Dialect/StandardOps/IR/Ops.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/Passes.h"
+#include "llvm/ADT/STLExtras.h"
+#include "mlir/IR/BuiltinTypes.h"  // from @llvm-project
 #include "mlir/IR/OperationSupport.h"  // from @llvm-project
-#include "mlir/IR/StandardTypes.h"  // from @llvm-project
 #include "mlir/IR/Types.h"  // from @llvm-project
 #include "mlir/Pass/PassOptions.h"  // from @llvm-project
 #include "tensorflow/compiler/mlir/tensorflow/ir/tf_ops.h"
-#include "tensorflow/compiler/mlir/tensorflow/transforms/passes.h"
+#include "tensorflow/compiler/mlir/tensorflow/transforms/passes_detail.h"
 #include "tensorflow/compiler/mlir/tensorflow/utils/convert_tensor.h"
 
 namespace mlir {
 namespace TF {
+
 namespace {
 
-// Deletes the op and forwards the arguments.
-template <typename TF_Op>
-class PassThroughConversion : public mlir::OpConversionPattern<TF_Op> {
- public:
-  explicit PassThroughConversion(MLIRContext *context)
-      : mlir::OpConversionPattern<TF_Op>(context) {}
+constexpr const char *kDeviceAttr = "device";
+constexpr const char *kTFDeviceAttr = "tf.device";
 
-  LogicalResult matchAndRewrite(
-      TF_Op op, ArrayRef<mlir::Value> operands,
-      ConversionPatternRewriter &rewriter) const override {  // NOLINT
-    // Just forward the arguments to results.
-    rewriter.replaceOp(op, operands);
-    return success();
-  }
+struct TensorDeviceCopyConversionPass
+    : public TensorDeviceCopyConversionPassBase<
+          TensorDeviceCopyConversionPass> {
+  void runOnFunction() override;
 };
 
-class TensorDeviceCopyConversionPass
-    : public PassWrapper<TensorDeviceCopyConversionPass, FunctionPass> {
- public:
-  void runOnFunction() override {
-    mlir::OwningRewritePatternList patterns;
-    mlir::ConversionTarget target(getContext());
+// Folds tf.IdentityOp and tf.IdentityNOp if op device and the argument devices
+// from the defining ops match.
+void TensorDeviceCopyConversionPass::runOnFunction() {
+  FuncOp func_op = getFunction();
 
-    // TODO(tfrt-devs): when device placer is introduced in the lowering pass,
-    // we need to check if Identity op and it's previous op are placed on the
-    // same device. If not, we don't fold Identity op since it's used for tensor
-    // copying between devices.
-    patterns.insert<PassThroughConversion<TF::IdentityOp>,
-                    PassThroughConversion<TF::IdentityNOp>>(&getContext());
-
-    if (failed(applyPartialConversion(getFunction(), target, patterns))) {
-      signalPassFailure();
+  auto should_fold_op_func = [&func_op](const mlir::Value &arg,
+                                        const StringAttr &op_device) {
+    if (BlockArgument block_arg = arg.dyn_cast<BlockArgument>()) {
+      // Skip the folding logic if the block argument is not from the function
+      // arguments. This can happen when the argument is from a while loop.
+      if (block_arg.getParentRegion() != &func_op.getRegion()) {
+        return false;
+      }
+      if (StringAttr attr = func_op.getArgAttrOfType<StringAttr>(
+              block_arg.getArgNumber(), kTFDeviceAttr)) {
+        return op_device == attr;
+      }
+    } else if (StringAttr attr = arg.getDefiningOp()->getAttrOfType<StringAttr>(
+                   kDeviceAttr)) {
+      return op_device == attr;
     }
-  }
-};
+    // when arg device is not defined, fold op if op device is not defined
+    // either.
+    return !op_device;
+  };
+
+  func_op.walk([&should_fold_op_func](TF::IdentityOp op) {
+    StringAttr op_device = op->getAttrOfType<StringAttr>(kDeviceAttr);
+    if (should_fold_op_func(op.getOperand(), op_device)) {
+      op.replaceAllUsesWith(op.getOperand());
+      op.erase();
+    }
+    return WalkResult::advance();
+  });
+
+  func_op.walk([&should_fold_op_func](TF::IdentityNOp op) {
+    StringAttr op_device = op->getAttrOfType<StringAttr>(kDeviceAttr);
+    bool should_fold = llvm::all_of(
+        op.getOperands(),
+        [&op_device, &should_fold_op_func](const mlir::Value &arg) {
+          return should_fold_op_func(arg, op_device);
+        });
+    if (should_fold) {
+      op.replaceAllUsesWith(op.getOperands());
+      op.erase();
+    }
+    return WalkResult::advance();
+  });
+}
 
 }  // namespace
 
@@ -71,11 +99,6 @@ std::unique_ptr<OperationPass<mlir::FuncOp>>
 CreateTensorDeviceCopyConversionPass() {
   return std::make_unique<TensorDeviceCopyConversionPass>();
 }
-
-static mlir::PassRegistration<TensorDeviceCopyConversionPass>
-    tensor_device_copy_pass(
-        "tf-tensor-device-copy",
-        "Handle ops that copy tensors between devices. E.g., tf.Identity.");
 
 }  // namespace TF
 }  // namespace mlir

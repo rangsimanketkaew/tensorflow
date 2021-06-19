@@ -13,6 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include "tensorflow/core/platform/errors.h"
 #define EIGEN_USE_THREADS
 
 // See docs in ../ops/fft_ops.cc.
@@ -31,7 +32,6 @@ limitations under the License.
 
 #if (defined(GOOGLE_CUDA) && GOOGLE_CUDA) || \
     (defined(TENSORFLOW_USE_ROCM) && TENSORFLOW_USE_ROCM)
-#include "tensorflow/core/kernels/gpu_utils.h"
 #include "tensorflow/core/platform/stream_executor.h"
 #endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
@@ -222,6 +222,9 @@ class FFTCPU : public FFTBase {
       input_slice_sizes[i] = fft_shape[i - 1];
       temp_shape.AddDim(fft_shape[i - 1]);
     }
+    OP_REQUIRES(ctx, temp_shape.num_elements() > 0,
+                errors::InvalidArgument("Obtained a FFT shape of 0 elements: ",
+                                        temp_shape.DebugString()));
 
     auto output = out->flat_inner_dims<ComplexT, FFTRank + 1>();
     const Eigen::DSizes<Eigen::DenseIndex, FFTRank + 1> zero_start_indices;
@@ -262,6 +265,9 @@ class FFTCPU : public FFTBase {
           i == FFTRank ? fft_shape[i - 1] / 2 + 1 : fft_shape[i - 1];
       full_fft_shape.AddDim(fft_shape[i - 1]);
     }
+    OP_REQUIRES(ctx, full_fft_shape.num_elements() > 0,
+                errors::InvalidArgument("Obtained a FFT shape of 0 elements: ",
+                                        full_fft_shape.DebugString()));
 
     Tensor temp;
     OP_REQUIRES_OK(ctx, ctx->allocate_temp(DataTypeToEnum<ComplexT>::v(),
@@ -401,7 +407,20 @@ class CufftScratchAllocator : public se::ScratchAllocator {
 
 int64 GetCufftWorkspaceLimit(const string& envvar_in_mb,
                              int64 default_value_in_bytes) {
-  return gpu_utils::GetWorkspaceLimit(envvar_in_mb, default_value_in_bytes);
+  const char* workspace_limit_in_mb_str = getenv(envvar_in_mb.c_str());
+  if (workspace_limit_in_mb_str != nullptr &&
+      strcmp(workspace_limit_in_mb_str, "") != 0) {
+    int64 scratch_limit_in_mb = -1;
+    Status status = ReadInt64FromEnvVar(envvar_in_mb, default_value_in_bytes,
+                                        &scratch_limit_in_mb);
+    if (!status.ok()) {
+      LOG(WARNING) << "Invalid value for env-var " << envvar_in_mb << ": "
+                   << workspace_limit_in_mb_str;
+    } else {
+      return scratch_limit_in_mb * (1 << 20);
+    }
+  }
+  return default_value_in_bytes;
 }
 
 class FFTGPUBase : public FFTBase {
@@ -517,10 +536,12 @@ class FFTGPUBase : public FFTBase {
                      se::fft::Plan* plan, const se::fft::Type fft_type,
                      const uint64 output_distance, const Tensor& in,
                      Tensor* out) {
-    auto src = AsDeviceMemory<InT>(in.flat<InT>().data());
-    auto dst = AsDeviceMemory<OutT>(out->flat<OutT>().data());
     const TensorShape& input_shape = in.shape();
     const TensorShape& output_shape = out->shape();
+    auto src =
+        AsDeviceMemory<InT>(in.flat<InT>().data(), input_shape.num_elements());
+    auto dst = AsDeviceMemory<OutT>(out->flat<OutT>().data(),
+                                    output_shape.num_elements());
     OP_REQUIRES(
         ctx, stream->ThenFft(plan, src, &dst).ok(),
         errors::Internal("fft failed : type=", static_cast<int>(fft_type),

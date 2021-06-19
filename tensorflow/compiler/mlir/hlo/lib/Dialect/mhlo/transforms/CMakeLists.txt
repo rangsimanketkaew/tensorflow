@@ -48,6 +48,7 @@ add_mlir_library(ChloPasses
 )
 
 add_mlir_library(MhloPasses
+  broadcast_propagation.cc
   legalize_gather_to_torch_index_select.cc
   legalize_trigonometric_to_approximation.cc
   lower_complex.cc
@@ -58,15 +59,17 @@ add_mlir_library(MhloPasses
   mhlo_fusion.cc
   optimize_mhlo.cc
   optimize_mhlo_pass.cc
+  rank_specialization.cc
   sink_constants_to_control_flow.cc
   test_infer_shaped_type_pass.cc
-  transform_unranked_hlo.cc
   unfuse_batch_norm.cc
   unfuse_batch_norm_pass.cc
 
   DEPENDS
+  MLIRDiscRalPassIncGen
   MLIRhlo_opsIncGen
   MLIRMhloLowerComplexIncGen
+  MLIRMhloPassIncGen
 
   LINK_COMPONENTS
   Core
@@ -93,6 +96,7 @@ add_mlir_library(MhloToLhloConversion
   LmhloDialect
   MLIRIR
   MLIRPass
+  MLIRMath
 )
 
 add_mlir_library(MhloToStandard
@@ -111,6 +115,7 @@ add_mlir_library(MhloToStandard
   LINK_LIBS PUBLIC
   MLIRIR
   MLIRPass
+  MLIRTensor
 )
 
 add_mlir_library(MhloLhloToLinalg
@@ -125,16 +130,18 @@ add_mlir_library(MhloLhloToLinalg
 
   LINK_LIBS PUBLIC
   MhloDialect
+  MLIRComplex
   MLIRIR
   MLIRPass
 )
 
 add_mlir_library(LmhloPasses
+  fusion_utils.cc
+  legalize_tensor_load_op.cc
   lhlo_fuse_linalg.cc
+  lhlo_fusion.cc
   lhlo_legalize_to_affine.cc
   lhlo_legalize_to_gpu.cc
-  lhlo_legalize_to_llvm.cc
-  lhlo_legalize_to_llvm_pass.cc
   lhlo_legalize_to_parallel_loops.cc
 
   DEPENDS
@@ -149,9 +156,26 @@ add_mlir_library(LmhloPasses
   MLIRPass
 )
 
+add_mlir_library(DiscRalPasses
+  ral_inject_execution_context.cc
+
+  DEPENDS
+  MLIRdisc_ral_opsIncGen
+  MLIRDiscRalPassIncGen
+
+  LINK_COMPONENTS
+  Core
+
+  LINK_LIBS PUBLIC
+  DiscRalDialect
+  MLIRIR
+  MLIRPass
+)
+
 add_library(AllMhloPasses INTERFACE)
 target_link_libraries(AllMhloPasses INTERFACE
   ChloPasses
+  DiscRalPasses
   MhloPasses
   MhloToLhloConversion
   MhloToStandard

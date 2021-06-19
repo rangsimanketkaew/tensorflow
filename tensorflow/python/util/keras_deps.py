@@ -28,17 +28,59 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+from tensorflow.python.util.tf_export import tf_export
 
 _KERAS_CALL_CONTEXT_FUNCTION = None
+_KERAS_CLEAR_SESSION_FUNCTION = None
+_KERAS_GET_SESSION_FUNCTION = None
+_KERAS_LOAD_MODEL_FUNCTION = None
+
+# TODO(scottzhu): Disable duplicated inject once keras is moved to
+# third_party/py/keras.
+# TODO(b/169898786): Use the Keras public API when TFLite moves out of TF
 
 
+# Register functions
+@tf_export('__internal__.register_call_context_function', v1=[])
 def register_call_context_function(func):
   global _KERAS_CALL_CONTEXT_FUNCTION
-  # TODO(scottzhu): Disable duplicated inject once keras is moved to
-  # third_party/py/keras.
   _KERAS_CALL_CONTEXT_FUNCTION = func
 
 
+@tf_export('__internal__.register_clear_session_function', v1=[])
+def register_clear_session_function(func):
+  global _KERAS_CLEAR_SESSION_FUNCTION
+  _KERAS_CLEAR_SESSION_FUNCTION = func
+
+
+@tf_export('__internal__.register_get_session_function', v1=[])
+def register_get_session_function(func):
+  global _KERAS_GET_SESSION_FUNCTION
+  _KERAS_GET_SESSION_FUNCTION = func
+
+
+@tf_export('__internal__.register_load_model_function', v1=[])
+def register_load_model_function(func):
+  global _KERAS_LOAD_MODEL_FUNCTION
+  _KERAS_LOAD_MODEL_FUNCTION = func
+
+
+# Get functions
 def get_call_context_function():
   global _KERAS_CALL_CONTEXT_FUNCTION
   return _KERAS_CALL_CONTEXT_FUNCTION
+
+
+def get_clear_session_function():
+  global _KERAS_CLEAR_SESSION_FUNCTION
+  return _KERAS_CLEAR_SESSION_FUNCTION
+
+
+def get_get_session_function():
+  global _KERAS_GET_SESSION_FUNCTION
+  return _KERAS_GET_SESSION_FUNCTION
+
+
+def get_load_model_function():
+  global _KERAS_LOAD_MODEL_FUNCTION
+  return _KERAS_LOAD_MODEL_FUNCTION

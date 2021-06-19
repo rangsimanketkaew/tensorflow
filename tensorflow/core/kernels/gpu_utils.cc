@@ -22,7 +22,6 @@ limitations under the License.
 #include "google/protobuf/any.pb.h"
 #include "absl/algorithm/container.h"
 #include "absl/base/call_once.h"
-#include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/platform/logger.h"
 #include "tensorflow/core/protobuf/autotuning.pb.h"
 #include "tensorflow/core/protobuf/conv_autotuning.pb.h"
@@ -113,13 +112,12 @@ tensorflow::CudnnVersion GetCudnnVersion(se::StreamExecutor* stream_executor) {
 
 tensorflow::ComputeCapability GetComputeCapability(
     se::StreamExecutor* stream_executor) {
-  tensorflow::ComputeCapability cc;
-  int cc_major, cc_minor;
-  stream_executor->GetDeviceDescription().cuda_compute_capability(&cc_major,
-                                                                  &cc_minor);
-  cc.set_major(cc_major);
-  cc.set_minor(cc_minor);
-  return cc;
+  tensorflow::ComputeCapability cc_proto;
+  se::CudaComputeCapability cc =
+      stream_executor->GetDeviceDescription().cuda_compute_capability();
+  cc_proto.set_major(cc.major);
+  cc_proto.set_minor(cc.minor);
+  return cc_proto;
 }
 
 }  // namespace
@@ -215,130 +213,58 @@ void LogFusedConvForwardAutotuneResults(
   Logger::GetSingleton()->LogProto(log);
 }
 
-// The following function allows deterministic ops to be implemented relatively
-// quickly using environment variables. It is intended to be temporary. The
-// longer-term intention is to enable deterministic ops via tf.config and
-// appropriate plumbing. See the discussion on PR 34951 for more information:
-// https://github.com/tensorflow/tensorflow/pull/34951#discussion_r355682316
-// This function and associated comment are replicated in the following three
-// places:
-//   1. tensorflow/compiler/xla/service/gpu/gpu_conv_algorithm_picker.cc
-//   2. tensorflow/core/kernels/gpu_utils.cc
-//   3. tensorflow/stream_executor/cuda/cuda_dnn.cc
-// When implementing the plumbing, you should also search for the use of
-// TF_DETERMINISTIC_OPS on its own.
-// TODO(duncanriach): move to an API that uses tf.config and implement the first
-//                    phase of plumbing.
-bool RequireCudnnDeterminism() {
-  static bool require_cudnn_determinism = [] {
-    bool deterministic_ops = false;
-    TF_CHECK_OK(tensorflow::ReadBoolFromEnvVar("TF_DETERMINISTIC_OPS",
-                                               /*default_val=*/false,
-                                               &deterministic_ops));
-    bool cudnn_deterministic = false;
-    TF_CHECK_OK(tensorflow::ReadBoolFromEnvVar("TF_CUDNN_DETERMINISTIC",
-                                               /*default_val=*/false,
-                                               &cudnn_deterministic));
-    return deterministic_ops || cudnn_deterministic;
-  }();
-  return require_cudnn_determinism;
-}
-
-Status BestCudnnConvAlgorithm(absl::Span<const AutotuneResult> results,
-                              se::dnn::AlgorithmConfig* algo) {
-  std::vector<AutotuneResult> filtered_results;
-  absl::c_copy_if(
-      results, std::back_inserter(filtered_results),
-      [](const AutotuneResult& result) { return !result.has_failure(); });
-  if (filtered_results.empty()) {
-    return errors::NotFound("No algorithm worked!");
-  }
-  std::vector<AutotuneResult> filtered_results_no_scratch;
-  absl::c_copy_if(
-      filtered_results, std::back_inserter(filtered_results_no_scratch),
-      [](const AutotuneResult& result) { return result.scratch_bytes() == 0; });
-
-  auto selected_result = filtered_results.begin();
-  auto selected_result_no_scratch = filtered_results_no_scratch.begin();
-  if (!RequireCudnnDeterminism()) {
-    auto compare_run_times = [](const AutotuneResult& lhs,
-                                const AutotuneResult& rhs) {
-      return proto_utils::FromDurationProto(lhs.run_time()) <
-             proto_utils::FromDurationProto(rhs.run_time());
-    };
-    selected_result = absl::c_min_element(filtered_results, compare_run_times);
-    selected_result_no_scratch =
-        absl::c_min_element(filtered_results_no_scratch, compare_run_times);
-  }
-
-  algo->set_algorithm({selected_result->conv().algorithm(),
-                       selected_result->conv().tensor_ops_enabled()});
-  algo->set_scratch_size(selected_result->scratch_bytes());
-  if (selected_result_no_scratch != filtered_results_no_scratch.end()) {
-    algo->set_algorithm_no_scratch(
-        {selected_result_no_scratch->conv().algorithm(),
-         selected_result_no_scratch->conv().tensor_ops_enabled()});
-  }
-
-  return Status::OK();
-}
-
-namespace gpu_utils {
-int64 GetWorkspaceLimit(const string& envvar_in_mb,
-                        int64 default_value_in_bytes) {
-  const char* workspace_limit_in_mb_str = getenv(envvar_in_mb.c_str());
-  if (workspace_limit_in_mb_str != nullptr &&
-      strcmp(workspace_limit_in_mb_str, "") != 0) {
-    int64 scratch_limit_in_mb = -1;
-    if (strings::safe_strto64(workspace_limit_in_mb_str,
-                              &scratch_limit_in_mb)) {
-      return scratch_limit_in_mb * (1 << 20);
-    } else {
-      LOG(WARNING) << "Invalid value for env-var " << envvar_in_mb << ": "
-                   << workspace_limit_in_mb_str;
+Status BestCudnnConvAlgorithm(
+    absl::Span<const AutotuneResult> results,
+    std::vector<std::unique_ptr<se::dnn::ConvolveExecutionPlan>>* plans,
+    se::dnn::AlgorithmConfig* algo) {
+  auto compare_run_times = [](const AutotuneResult& lhs,
+                              const AutotuneResult& rhs) {
+    return proto_utils::FromDurationProto(lhs.run_time()) <
+           proto_utils::FromDurationProto(rhs.run_time());
+  };
+  int idx = -1;
+  int idx_no_scratch = -1;
+  for (int i = 0; i < results.size(); i++) {
+    if (!results[i].has_failure()) {
+      if (idx == -1 || compare_run_times(results[i], results[idx])) {
+        idx = i;
+      }
+      if (results[i].scratch_bytes() == 0 &&
+          (idx_no_scratch == -1 ||
+           compare_run_times(results[i], results[idx_no_scratch]))) {
+        idx_no_scratch = i;
+      }
     }
   }
-  return default_value_in_bytes;
-}
-}  // namespace gpu_utils
 
-GpuScratchAllocator::GpuScratchAllocator(int64 memory_limit,
-                                         OpKernelContext* context)
-    : memory_limit_(memory_limit), total_byte_size_(0), context_(context) {}
+  if (idx == -1) {
+    return errors::NotFound("No algorithm worked!");
+  }
 
-se::port::StatusOr<se::DeviceMemory<uint8>> GpuScratchAllocator::AllocateBytes(
-    int64 byte_size) {
-  Tensor temporary_memory;
-  if (byte_size < 0) {
-    return se::port::Status{se::port::error::INVALID_ARGUMENT,
-                            "Requested negative byte size!"};
+  if (plans == nullptr) {
+    algo->set_algorithm({results[idx].conv().algorithm(),
+                         results[idx].conv().tensor_ops_enabled()});
+    algo->set_scratch_size(results[idx].scratch_bytes());
+    if (idx_no_scratch != -1) {
+      algo->set_algorithm_no_scratch(
+          {results[idx_no_scratch].conv().algorithm(),
+           results[idx_no_scratch].conv().tensor_ops_enabled()});
+    }
+  } else {
+    algo->set_algorithm(
+        {(*plans)[idx]->getTag(), (*plans)[idx]->get_raw_desc()});
+    algo->set_scratch_size((*plans)[idx]->getWorkspaceSize());
+    if (idx_no_scratch != -1) {
+      algo->set_algorithm_no_scratch(
+          {(*plans)[idx_no_scratch]->getTag(),
+           (*plans)[idx_no_scratch]->get_raw_desc()});
+    }
+    algo->set_plan((*plans)[idx]);
+    if (idx_no_scratch != -1 && idx_no_scratch != idx) {
+      algo->set_plan_no_scratch((*plans)[idx_no_scratch]);
+    }
   }
-  if (byte_size > memory_limit_) {
-    return se::port::Status{
-        se::port::error::UNAVAILABLE,
-        absl::StrCat("Requested memory size (", byte_size,
-                     ") exceeds the max memory limit (", memory_limit_, ").")};
-  }
-  AllocationAttributes allocation_attr;
-  allocation_attr.retry_on_failure = false;
-  Status allocation_status(context_->allocate_temp(
-      DT_UINT8, TensorShape({byte_size}), &temporary_memory,
-      AllocatorAttributes(), allocation_attr));
-  if (!allocation_status.ok()) {
-    return se::port::Status{
-        se::port::error::UNAVAILABLE,
-        absl::StrCat("Failed to allocate the requested memory size (",
-                     byte_size, ").")};
-  }
-  // Hold the reference of the allocated tensors until the end of the
-  // allocator.
-  // NOTE: We expect tensors to be deallocated when this allocator goes out of
-  // scope when allocated_tensors is destructed.
-  allocated_tensors_.push_back(temporary_memory);
-  total_byte_size_ += byte_size;
-  return se::port::StatusOr<se::DeviceMemory<uint8>>(
-      AsDeviceMemory(temporary_memory.flat<uint8>().data(),
-                     temporary_memory.flat<uint8>().size()));
+  return Status::OK();
 }
 
 }  // namespace tensorflow

@@ -30,15 +30,6 @@ limitations under the License.
 
 namespace tensorflow {
 
-// Returns true if the given StreamExecutor is for a Volta or newer nvidia GPU.
-inline bool IsVoltaOrLater(const se::StreamExecutor& stream_exec) {
-  int major, minor;
-  CHECK(stream_exec  // Crash OK
-            .GetDeviceDescription()
-            .cuda_compute_capability(&major, &minor));
-  return major >= 7;
-}
-
 // Get the Dnn workspace limit from the environment variable, which is in MB.
 // Return the workspace memory limit in bytes. If no value is set, return the
 // default value.
@@ -48,7 +39,52 @@ int64 GetDnnWorkspaceLimit(const string& envvar_in_mb,
 // A class to provide scratch-space allocator for Stream-Executor Cudnn
 // callback. TensorFlow is responsible for releasing the temporary buffers after
 // the kernel finishes.
-using DnnScratchAllocator = GpuScratchAllocator;
+class DnnScratchAllocator : public se::ScratchAllocator {
+ public:
+  virtual ~DnnScratchAllocator() {}
+  DnnScratchAllocator(int64 memory_limit, OpKernelContext* context)
+      : memory_limit_(memory_limit), total_byte_size_(0), context_(context) {}
+  int64 GetMemoryLimitInBytes() override { return memory_limit_; }
+  se::port::StatusOr<se::DeviceMemory<uint8>> AllocateBytes(
+      int64 byte_size) override {
+    Tensor temporary_memory;
+    if (byte_size < 0) {
+      return se::port::Status{se::port::error::INVALID_ARGUMENT,
+                              "Requested negative byte size!"};
+    }
+    if (byte_size > memory_limit_) {
+      return se::port::Status{se::port::error::UNAVAILABLE,
+                              absl::StrCat("Requested memory size (", byte_size,
+                                           ") exceeds the max memory limit (",
+                                           memory_limit_, ").")};
+    }
+    AllocationAttributes allocation_attr;
+    allocation_attr.retry_on_failure = false;
+    Status allocation_status(context_->allocate_temp(
+        DT_UINT8, TensorShape({byte_size}), &temporary_memory,
+        AllocatorAttributes(), allocation_attr));
+    if (!allocation_status.ok()) {
+      return se::port::Status{
+          se::port::error::UNAVAILABLE,
+          absl::StrCat("Failed to allocate the requested memory size (",
+                       byte_size, ").")};
+    }
+    // Hold the reference of the allocated tensors until the end of the
+    // allocator.
+    allocated_tensors_.push_back(temporary_memory);
+    total_byte_size_ += byte_size;
+    return se::port::StatusOr<se::DeviceMemory<uint8>>(
+        AsDeviceMemory(temporary_memory.flat<uint8>().data(),
+                       temporary_memory.flat<uint8>().size()));
+  }
+  int64 TotalByteSize() { return total_byte_size_; }
+
+ private:
+  int64 memory_limit_;
+  int64 total_byte_size_;
+  OpKernelContext* context_;
+  std::vector<Tensor> allocated_tensors_;
+};
 
 // Encapsulate all the shape information that is used in both forward and
 // backward conv operations.

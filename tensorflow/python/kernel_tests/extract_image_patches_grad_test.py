@@ -117,8 +117,9 @@ class ExtractImagePatchesGradTest(test.TestCase, parameterized.TestCase):
   def testConstructGradientWithLargeImages(self, use_tape):
     with test_util.AbstractGradientTape(use_tape=use_tape) as tape:
       batch_size = 4
-      height = 1024
-      width = 1024
+      # Prevent OOM by setting reasonably large image size (b/171808681).
+      height = 512
+      width = 512
       ksize = 5
       shape = (batch_size, height, width, 1)
       images = variables.Variable(

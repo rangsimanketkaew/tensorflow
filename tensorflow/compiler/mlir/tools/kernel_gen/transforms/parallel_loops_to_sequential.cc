@@ -29,14 +29,15 @@ namespace {
 struct ParallelLoopsToSequentialPass
     : public ParallelLoopsToSequentialBase<ParallelLoopsToSequentialPass> {
   void runOnFunction() override {
-    mlir::OwningRewritePatternList patterns;
-    mlir::populateLoopToStdConversionPatterns(patterns, &getContext());
+    mlir::RewritePatternSet patterns(&getContext());
+    mlir::populateLoopToStdConversionPatterns(patterns);
 
     mlir::ConversionTarget target(getContext());
     target.addIllegalOp<mlir::scf::ParallelOp>();
     target.addLegalOp<mlir::scf::ForOp, mlir::scf::IfOp>();
     target.markUnknownOpDynamicallyLegal([](mlir::Operation*) { return true; });
-    if (failed(applyPartialConversion(getOperation(), target, patterns)))
+    if (failed(applyPartialConversion(getOperation(), target,
+                                      std::move(patterns))))
       signalPassFailure();
   }
 };

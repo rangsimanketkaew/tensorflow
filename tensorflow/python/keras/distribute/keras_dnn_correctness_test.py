@@ -13,11 +13,9 @@
 # limitations under the License.
 # ==============================================================================
 """Correctness tests for tf.keras DNN model using DistributionStrategy."""
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
 
 import numpy as np
+
 from tensorflow.python import keras
 from tensorflow.python.data.ops import dataset_ops
 from tensorflow.python.distribute import combinations as ds_combinations
@@ -25,18 +23,19 @@ from tensorflow.python.distribute import distribution_strategy_context
 from tensorflow.python.distribute import multi_process_runner
 from tensorflow.python.eager import context
 from tensorflow.python.framework import test_combinations as combinations
-from tensorflow.python.keras import backend as K
+from tensorflow.python.keras import backend
 from tensorflow.python.keras import testing_utils
 from tensorflow.python.keras.distribute import keras_correctness_test_base
+from tensorflow.python.keras.distribute import strategy_combinations
 from tensorflow.python.keras.optimizer_v2 import gradient_descent as gradient_descent_keras
 from tensorflow.python.training import gradient_descent
 
 
 def all_strategy_combinations_with_eager_and_graph_modes():
   return (combinations.combine(
-      distribution=keras_correctness_test_base.all_strategies,
+      distribution=strategy_combinations.all_strategies,
       mode=['graph', 'eager']) + combinations.combine(
-          distribution=keras_correctness_test_base.multi_worker_mirrored,
+          distribution=strategy_combinations.multi_worker_mirrored_strategies,
           mode='eager'))
 
 
@@ -276,7 +275,8 @@ class TestDistributionStrategyDnnCorrectnessWithSubclassedModel(
   def test_dnn_correctness(self, distribution, use_numpy, use_validation_data):
     if (context.executing_eagerly()) or is_default_strategy(distribution):
       self.run_correctness_test(distribution, use_numpy, use_validation_data)
-    elif K.is_tpu_strategy(distribution) and not context.executing_eagerly():
+    elif (backend.is_tpu_strategy(distribution)
+          and not context.executing_eagerly()):
       with self.assertRaisesRegex(
           ValueError,
           'Expected `model` argument to be a functional `Model` instance, '
@@ -292,10 +292,11 @@ class TestDistributionStrategyDnnCorrectnessWithSubclassedModel(
 
   @ds_combinations.generate(all_strategy_combinations_with_graph_mode())
   def test_dnn_with_dynamic_learning_rate(self, distribution):
-    if ((context.executing_eagerly() and not K.is_tpu_strategy(distribution)) or
-        is_default_strategy(distribution)):
+    if ((context.executing_eagerly()
+         and not backend.is_tpu_strategy(distribution))
+        or is_default_strategy(distribution)):
       self.run_dynamic_lr_test(distribution)
-    elif K.is_tpu_strategy(distribution):
+    elif backend.is_tpu_strategy(distribution):
       with self.assertRaisesRegex(
           ValueError,
           'Expected `model` argument to be a functional `Model` instance, '

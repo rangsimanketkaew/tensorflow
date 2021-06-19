@@ -50,6 +50,8 @@ class SinkConstantsToControlFlowPass
       } else if (auto if_op = llvm::dyn_cast<IfOp>(op)) {
         SinkToRegion(&if_op.true_branch());
         SinkToRegion(&if_op.false_branch());
+      } else if (auto reduce_window_op = llvm::dyn_cast<ReduceWindowOp>(op)) {
+        SinkToRegion(&reduce_window_op.body());
       } else if (auto sort_op = llvm::dyn_cast<SortOp>(op)) {
         SinkToRegion(&sort_op.comparator());
       }
@@ -63,7 +65,7 @@ class SinkConstantsToControlFlowPass
     visitUsedValuesDefinedAbove({*region}, [&](OpOperand* use) {
       Value constant = use->get();
       auto op = constant.getDefiningOp();
-      if (!op || !op->hasTrait<OpTrait::ConstantLike>()) return;
+      if (!op || !op->hasTrait<mlir::OpTrait::ConstantLike>()) return;
       auto map_entry = sunk_constant.try_emplace(constant, nullptr);
       if (!map_entry.second) {
         // This constant has already been cloned into the region, reuse it.

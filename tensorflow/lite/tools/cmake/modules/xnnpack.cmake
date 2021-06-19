@@ -21,8 +21,9 @@ include(FetchContent)
 
 OverridableFetchContent_Declare(
   xnnpack
-  GIT_REPOSITORY https://github.com/google/xnnpack
-  GIT_TAG 0af63ab36b899559bd1a92bbc327f8137e53c15c
+  GIT_REPOSITORY https://github.com/google/XNNPACK
+  # Sync with tensorflow/workspace2.bzl
+  GIT_TAG 56b78a03e359ac04a3ba758596cd28b198a8000f
   GIT_PROGRESS TRUE
   PREFIX "${CMAKE_BINARY_DIR}"
   SOURCE_DIR "${CMAKE_BINARY_DIR}/xnnpack"

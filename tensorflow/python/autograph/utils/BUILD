@@ -1,7 +1,7 @@
 load("//tensorflow:tensorflow.bzl", "py_test")
 
 package(
-    licenses = ["notice"],  # Apache 2.0
+    licenses = ["notice"],
 )
 
 filegroup(
@@ -21,7 +21,6 @@ py_library(
     srcs = [
         "__init__.py",
         "ag_logging.py",
-        "compat_util.py",
         "context_managers.py",
         "misc.py",
         "py_func.py",

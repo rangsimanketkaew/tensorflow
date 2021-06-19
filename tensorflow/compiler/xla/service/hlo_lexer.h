@@ -61,6 +61,7 @@ enum class TokKind {
   kw_false,
   kw_maximal,
   kw_replicated,
+  kw_manual,
   kw_last_tile_dim_replicate,
   kw_nan,
   kw_inf,
@@ -72,7 +73,7 @@ enum class TokKind {
   kPrimitiveType,  // F32, PRED, etc.
   kName,           // %foo
   kAttributeName,  // dimensions=
-  kDimLabels,      // [0-9bf]{2,}_[0-9io]{2,}->[0-9bf]{2,}
+  kDimLabels,      // [0-9bf?]{2,}_[0-9io?]{2,}->[0-9bf?]{2,}
   kDxD,            // [0-9]+(x[0-9]+)+
   kPad,            // [0-9]+_[0-9]+(_[0-9]+)?(x[0-9]+_[0-9]+(_[0-9]+)?)*
   kIdent,          // other identifiers

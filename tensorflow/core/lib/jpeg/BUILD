@@ -15,7 +15,8 @@ load(
 
 package(
     default_visibility = ["//tensorflow/core:__pkg__"],
-    licenses = ["notice"],  # Apache 2.0
+    features = ["-parse_headers"],
+    licenses = ["notice"],
 )
 
 cc_library(

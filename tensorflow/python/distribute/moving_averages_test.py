@@ -41,6 +41,7 @@ all_distributions = [
     strategy_combinations.multi_worker_mirrored_2x1_cpu,
     strategy_combinations.multi_worker_mirrored_2x1_gpu,
     strategy_combinations.multi_worker_mirrored_2x2_gpu,
+    strategy_combinations.multi_worker_mirrored_2x2_gpu_no_merge_call,
     strategy_combinations.multi_worker_mirrored_4x1_cpu,
 ]
 
@@ -287,4 +288,5 @@ class ExponentialMovingAverageTest(test.TestCase, parameterized.TestCase):
 
 
 if __name__ == "__main__":
-  test_util.main()
+  # TODO(b/172304955): enable logical devices.
+  test_util.main(config_logical_devices=False)

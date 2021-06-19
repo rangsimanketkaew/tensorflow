@@ -14,10 +14,6 @@
 # ==============================================================================
 """Tests for custom training loops that involves advanced optimizer usage."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from absl.testing import parameterized
 from tensorflow.python.distribute import combinations as ds_combinations
 from tensorflow.python.distribute import strategy_combinations
@@ -25,6 +21,7 @@ from tensorflow.python.distribute import values
 from tensorflow.python.eager import def_function
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import test_combinations as combinations
+from tensorflow.python.keras.distribute import strategy_combinations as keras_strategy_combinations
 from tensorflow.python.keras.optimizer_v2 import gradient_descent
 from tensorflow.python.ops import variables
 from tensorflow.python.platform import test
@@ -35,7 +32,7 @@ class OptimizerTest(test.TestCase, parameterized.TestCase):
   @ds_combinations.generate(
       combinations.times(
           combinations.combine(
-              distribution=strategy_combinations.multidevice_strategies,
+              distribution=keras_strategy_combinations.multidevice_strategies,
               mode=["eager"],
           ),
           combinations.combine(
@@ -52,13 +49,21 @@ class OptimizerTest(test.TestCase, parameterized.TestCase):
       v = variables.Variable([0., 0.])
       optimizer = gradient_descent.SGD(0.1)
 
+    class PerReplica(values.DistributedValues):
+      """Holds a map from replica to unsynchronized values."""
+
+      @property
+      def values(self):
+        """Returns the per replica values."""
+        return self._values
+
     @def_function.function
     def optimize():
-      grads = values.PerReplica([
-          ops.convert_to_tensor_v2_with_dispatch([1., 1.]),
-          ops.convert_to_tensor_v2_with_dispatch([2., 2.]),
-      ])
-
+      with ops.device(distribution.extended.worker_devices[0]):
+        v1 = ops.convert_to_tensor_v2_with_dispatch([1., 1.])
+      with ops.device(distribution.extended.worker_devices[1]):
+        v2 = ops.convert_to_tensor_v2_with_dispatch([2., 2.])
+      grads = PerReplica([v1, v2])
       def step_fn(grads):
         optimizer.apply_gradients(
             [(grads, v)],

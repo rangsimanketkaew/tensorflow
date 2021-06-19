@@ -25,6 +25,8 @@ limitations under the License.
 #include "tensorflow/c/c_api.h"
 #include "tensorflow/c/eager/c_api.h"
 #include "tensorflow/c/eager/c_api_internal.h"
+#include "tensorflow/c/eager/tfe_context_internal.h"
+#include "tensorflow/c/eager/tfe_tensorhandle_internal.h"
 #include "tensorflow/c/tf_status.h"
 #include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/framework/types.pb.h"
@@ -36,6 +38,7 @@ limitations under the License.
 #include "tensorflow/python/lib/core/numpy.h"
 #include "tensorflow/python/lib/core/py_exception_registry.h"
 #include "tensorflow/python/lib/core/py_seq_tensor.h"
+#include "tensorflow/python/lib/core/pybind11_status.h"
 #include "tensorflow/python/lib/core/safe_ptr.h"
 
 // forward declare
@@ -184,13 +187,9 @@ int ConvertDeviceName(PyObject* obj, const char** dst) {
   return 1;
 }
 
-void RaiseExceptionTypeFromTFStatus(TF_Status* status) {
-  TF_Code code = TF_GetCode(status);
-  PyObject* exception = tensorflow::PyExceptionRegistry::Lookup(code);
-  PyErr_SetObject(exception,
-                  pybind11::make_tuple(pybind11::none(), pybind11::none(),
-                                       TF_Message(status))
-                      .ptr());
+void RaiseExceptionTypeFromTFStatus(TF_Status* tf_status) {
+  auto status = tensorflow::StatusFromTF_Status(tf_status);
+  SetRegisteredErrFromStatus(status);
 }
 
 }  // namespace
@@ -259,6 +258,28 @@ TFE_TensorHandle* EagerCast(TFE_Context* ctx, TFE_TensorHandle* handle,
 #undef RETURN_ERROR
 }
 
+Safe_TFE_TensorHandlePtr EagerConst(TFE_Context* ctx, TFE_TensorHandle* handle,
+                                    const char* device_name,
+                                    TF_Status* out_status) {
+  const char* op_name = "_EagerConst";
+  std::unique_ptr<TFE_Op, decltype(&TFE_DeleteOp)> op(
+      TFE_NewOp(ctx, op_name, out_status), TFE_DeleteOp);
+  if (!out_status->status.ok()) return nullptr;
+  TFE_OpSetDevice(op.get(), device_name, out_status);
+  if (!out_status->status.ok()) return nullptr;
+  TFE_OpAddInput(op.get(), handle, out_status);
+  if (!out_status->status.ok()) return nullptr;
+  TFE_OpSetAttrType(op.get(), "T", TFE_TensorHandleDataType(handle));
+  TFE_TensorHandle* output = nullptr;
+  int num_outputs = 1;
+  TFE_Execute(op.get(), &output, &num_outputs, out_status);
+  Safe_TFE_TensorHandlePtr result(output);
+  if (!out_status->status.ok() || num_outputs != 1) {
+    return nullptr;
+  }
+  return result;
+}
+
 TFE_TensorHandle* ConvertToEagerTensorUncached(TFE_Context* ctx,
                                                PyObject* value,
                                                tensorflow::DataType dtype,
@@ -307,19 +328,53 @@ TFE_TensorHandle* ConvertToEagerTensorUncached(TFE_Context* ctx,
     }
   }
 
-  // We always generate CPU:0 tensors, but we may need to change the device
-  // slightly, as for example from /job:localhost/... to /job:worker/...
-  //
-  // Note that this is a shallow copy and will share the underlying buffer,
-  // because we are copying to the same device.
-  if (device_name != nullptr &&
-      strstr(device_name, "/device:CPU:0") != nullptr) {
-    handle = make_safe(TFE_TensorHandleCopyToDevice(handle.get(), ctx,
-                                                    device_name, status.get()));
-    const TF_Code code = TF_GetCode(status.get());
-    if (code != TF_OK) {
-      RaiseExceptionTypeFromTFStatus(status.get());
-      return nullptr;
+  // We always initially generate CPU:0 tensors. Copy to the current device.
+  if (device_name != nullptr) {
+    if (strstr(device_name, "/device:CPU:0") != nullptr) {
+      // We always generate CPU:0 tensors, but we may need to change the device
+      // slightly, as for example from /job:localhost/... to /job:worker/...
+      //
+      // Note that this is a shallow copy and will share the underlying buffer,
+      // because we are copying to the same device.
+      handle = make_safe(TFE_TensorHandleCopyToDevice(
+          handle.get(), ctx, device_name, status.get()));
+      const TF_Code code = TF_GetCode(status.get());
+      if (code != TF_OK) {
+        RaiseExceptionTypeFromTFStatus(status.get());
+        return nullptr;
+      }
+    } else {
+      /*Copy the constant to the current device. Identity is sometimes
+        overloaded to allow copies like this, but using a different op allows
+        devices to support constant creation without allowing copies via
+        identity ops.
+
+        Note that running this _EagerConst op limits mirroring of cached Python
+        literals somewhat. Mirroring of constants themselves works:
+
+        with tf.device("GPU:0"):
+          tf.constant(1.)  # Cached on CPU:0, mirrored to GPU:0
+        with tf.device("GPU:1"):
+          tf.constant(1.)  # Cache hit for the CPU version, new mirror to GPU:1.
+        with tf.device("GPU:1"):
+          tf.constant(1.)  # Cache hit for the CPU version, cached mirror
+
+        But mirrors for the output of `tf.constant` are not shared just because
+        there was a cache hit for the input literal, because of _EagerConst:
+
+        x = tf.constant(2.)  # Cached on CPU:0
+        with tf.device("GPU:1"):
+          tf.identity(x)  # `x` now mirrored to GPU:1
+        y = tf.constant(2.)  # Cache hit for CPU version
+        with tf.device("GPU:1"):
+          tf.identity(y)  # `y` now mirrored on GPU:1 (new copy!)*/
+      handle =
+          tensorflow::EagerConst(ctx, handle.get(), device_name, status.get());
+      const TF_Code code = TF_GetCode(status.get());
+      if (code != TF_OK) {
+        RaiseExceptionTypeFromTFStatus(status.get());
+        return nullptr;
+      }
     }
   }
 
@@ -644,6 +699,32 @@ static PyObject* EagerTensor_numpy_internal(EagerTensor* self) {
   }
 }
 
+// Function `_has_custom_summarizer`.
+//
+// A hint that callers should prefer `SummarizeValue` to resolving this handle
+// and formatting the tensor.
+static PyObject* EagerTensor_has_custom_summarizer(EagerTensor* self) {
+  if (tensorflow::unwrap(self->handle)->HasCustomSummarizer()) {
+    Py_RETURN_TRUE;
+  } else {
+    Py_RETURN_FALSE;
+  }
+}
+
+// Function `_summarize_value`.
+//
+// Returns a string PyObject which summarizes the value of this tensor. It does
+// not include a shape or dtype.
+static PyObject* EagerTensor_summarize_value(EagerTensor* self) {
+  std::string summary;
+  tensorflow::Status status =
+      tensorflow::unwrap(self->handle)->SummarizeValue(summary);
+  if (MaybeRaiseExceptionFromStatus(status, nullptr)) {
+    return nullptr;
+  }
+  return PyUnicode_FromString(summary.c_str());
+}
+
 // Getter `device`.
 static PyObject* EagerTensor_device(EagerTensor* self) {
   const char* device = TFE_TensorHandleDeviceName(self->handle, &self->status);
@@ -724,6 +805,11 @@ static PyMethodDef EagerTensor_methods[] = {
      PyDoc_STR("Copies the tensor to the desired device.")},
     {"_num_elements", (PyCFunction)EagerTensor_num_elements, METH_NOARGS,
      PyDoc_STR("Number of elements in the tensor.")},
+    {"_has_custom_summarizer", (PyCFunction)EagerTensor_has_custom_summarizer,
+     METH_NOARGS,
+     PyDoc_STR("Indicates whether _numpy_internal loses information.")},
+    {"_summarize_value", (PyCFunction)EagerTensor_summarize_value, METH_NOARGS,
+     PyDoc_STR("A string which summarizes the value of this tensor.")},
     {nullptr, nullptr},
 };
 
@@ -1030,49 +1116,71 @@ PyObject* TFE_Py_TensorShapeSlice(PyObject* tensors, int slice_dim) {
     return nullptr;
   }
 
+  PyObject* py_context = GetPyEagerContext();
+  if (py_context == nullptr) {
+    PyErr_SetString(PyExc_RuntimeError, tensorflow::strings::StrCat(
+                                            "Cannot create EagerTensor when "
+                                            "EagerContext is not valid")
+                                            .c_str());
+    return nullptr;
+  }
+
+  TFE_Context* ctx = GetContextHandle(py_context);
+
   Py_ssize_t num_tensors = PySequence_Fast_GET_SIZE(tensors);
   PyObject** tensors_array = PySequence_Fast_ITEMS(tensors);
   int64_t num_tensors_int = static_cast<int64_t>(num_tensors);
-  auto tensor = tensorflow::make_safe(TF_AllocateTensor(
-      TF_INT32, &num_tensors_int, /*num_dims=*/1, /*len=*/4 * num_tensors_int));
-  int32_t* data = reinterpret_cast<int32_t*>(TF_TensorData(tensor.get()));
-  auto status = tensorflow::make_safe(TF_NewStatus());
-  for (Py_ssize_t i = 0; i < num_tensors; ++i) {
-    PyObject* tensor_obj = tensors_array[i];
-    if (!EagerTensor_CheckExact(tensor_obj)) {
-      PyErr_SetString(PyExc_TypeError,
-                      tensorflow::strings::StrCat(
-                          "Expected a list of EagerTensors but "
-                          "element ",
-                          i, " has type \"", Py_TYPE(tensor_obj)->tp_name, "\"")
-                          .c_str());
-      return nullptr;
-    }
 
-    EagerTensor* t = reinterpret_cast<EagerTensor*>(tensor_obj);
-    TFE_TensorHandle* handle = t->handle;
-    int num_dims = TFE_TensorHandleNumDims(handle, status.get());
-    if (MaybeRaiseExceptionFromTFStatus(status.get(), PyExc_ValueError)) {
-      return nullptr;
+  auto status = tensorflow::make_safe(TF_NewStatus());
+
+  // Create an empty tensor.
+  auto* tensor = tensorflow::unwrap(ctx)->CreateTensor(
+      tensorflow::DT_INT32, /*dim_sizes=*/{num_tensors_int});
+
+  if (num_tensors_int > 0) {
+    int32_t* data = reinterpret_cast<int32_t*>(tensor->Data());
+
+    // Fill the tensor with dims.
+    for (Py_ssize_t i = 0; i < num_tensors; ++i) {
+      PyObject* tensor_obj = tensors_array[i];
+      if (!EagerTensor_CheckExact(tensor_obj)) {
+        PyErr_SetString(
+            PyExc_TypeError,
+            tensorflow::strings::StrCat("Expected a list of EagerTensors but "
+                                        "element ",
+                                        i, " has type \"",
+                                        Py_TYPE(tensor_obj)->tp_name, "\"")
+                .c_str());
+        return nullptr;
+      }
+
+      EagerTensor* t = reinterpret_cast<EagerTensor*>(tensor_obj);
+      TFE_TensorHandle* handle = t->handle;
+      int num_dims = TFE_TensorHandleNumDims(handle, status.get());
+      if (MaybeRaiseExceptionFromTFStatus(status.get(), PyExc_ValueError)) {
+        return nullptr;
+      }
+      if (slice_dim >= num_dims) {
+        PyErr_SetString(
+            PyExc_IndexError,
+            tensorflow::strings::StrCat("Slice dimension (", slice_dim,
+                                        ") must be smaller than rank of all "
+                                        "tensors, but tensor at index ",
+                                        i, " has rank ", num_dims)
+                .c_str());
+        return nullptr;
+      }
+      int64_t dim = TFE_TensorHandleDim(handle, slice_dim, status.get());
+      if (MaybeRaiseExceptionFromTFStatus(status.get(), PyExc_ValueError)) {
+        return nullptr;
+      }
+      data[i] = dim;
     }
-    if (slice_dim >= num_dims) {
-      PyErr_SetString(
-          PyExc_IndexError,
-          tensorflow::strings::StrCat("Slice dimension (", slice_dim,
-                                      ") must be smaller than rank of all "
-                                      "tensors, but tensor at index ",
-                                      i, " has rank ", num_dims)
-              .c_str());
-      return nullptr;
-    }
-    int64_t dim = TFE_TensorHandleDim(handle, slice_dim, status.get());
-    if (MaybeRaiseExceptionFromTFStatus(status.get(), PyExc_ValueError)) {
-      return nullptr;
-    }
-    data[i] = dim;
   }
 
-  TFE_TensorHandle* handle = TFE_NewTensorHandle(tensor.get(), status.get());
+  TFE_TensorHandle* handle =
+      tensorflow::wrap(tensorflow::unwrap(ctx)->CreateLocalHandle(tensor));
+
   if (!status->status.ok()) {
     PyErr_SetString(
         PyExc_RuntimeError,

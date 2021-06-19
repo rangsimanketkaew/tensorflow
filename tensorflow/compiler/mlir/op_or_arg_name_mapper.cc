@@ -125,7 +125,7 @@ std::string OpOrArgLocNameMapper::GetName(OpOrVal op_or_val) {
                            result.getResultNumber());
     return std::string(result.getOwner()->getName().getStringRef());
   }
-  // Use the ASM syntax for BloackArgument
+  // Use the ASM syntax for BlockArgument
   if (auto arg = val.dyn_cast<mlir::BlockArgument>()) {
     return "arg" + std::to_string(arg.getArgNumber());
   }
@@ -133,7 +133,8 @@ std::string OpOrArgLocNameMapper::GetName(OpOrVal op_or_val) {
 }
 
 std::string OpOrArgStripNameMapper::GetName(OpOrVal op_or_val) {
-  return llvm::APInt(32, count_++).toString(/*Radix=*/36, /*Signed=*/false);
+  return llvm::toString(llvm::APInt(32, count_++),
+                        /*Radix=*/36, /*Signed=*/false);
 }
 
 }  // namespace tensorflow

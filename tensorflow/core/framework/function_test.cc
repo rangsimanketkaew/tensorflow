@@ -406,7 +406,7 @@ XTimesTwo[T:{float, double, int32, int64}](x:T) -> (y:T) {
 TEST(TFunc, WXPlusB) {
   auto expect = R"P(
 WXPlusB[T:{float, double}](w:T, x:T, b:T) -> (y:T) {
-  mm = MatMul[T=$T, _kernel="eigen", transpose_a=false, transpose_b=false](w, x)
+  mm = MatMul[T=$T, transpose_a=false, transpose_b=false](w, x)
   y = Add[T=$T](mm:product:0, b)
   return y = y:z:0
 }
@@ -912,9 +912,12 @@ TEST(FunctionCallFrame, Void_Void) {
   TF_EXPECT_OK(frame.SetArgs({}));
   auto a = test::AsTensor<float>({100});
   HasError(frame.SetArgs({a}), "Invalid argument");
-  const Tensor* v;
+  const Tensor* v = nullptr;
   HasError(frame.GetArg(0, &v), "Invalid argument");
-  HasError(frame.SetRetval(0, *v), "Invalid argument");
+  if (v != nullptr) {
+    // v is null in certain environments.
+    HasError(frame.SetRetval(0, *v), "Invalid argument");
+  }
   std::vector<Tensor> rets;
   TF_EXPECT_OK(frame.GetRetvals(&rets));
   EXPECT_EQ(rets.size(), 0);

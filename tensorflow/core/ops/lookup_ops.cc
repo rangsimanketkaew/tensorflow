@@ -169,10 +169,6 @@ REGISTER_OP("LookupTableFindV2")
       ShapeHandle handle;
       TF_RETURN_IF_ERROR(c->WithRank(c->input(0), 0, &handle));
 
-      // Default value must be scalar or vector.
-      ShapeHandle keys;
-      TF_RETURN_IF_ERROR(c->WithRankAtMost(c->input(2), 1, &keys));
-
       ShapeAndType value_shape_and_type;
       TF_RETURN_IF_ERROR(ValidateTableResourceHandle(
           c,
@@ -313,7 +309,9 @@ REGISTER_OP("LookupTableImportV2")
 
       ShapeHandle keys;
       TF_RETURN_IF_ERROR(c->WithRank(c->input(1), 1, &keys));
-      TF_RETURN_IF_ERROR(c->Merge(keys, c->input(2), &keys));
+      DimensionHandle unused;
+      TF_RETURN_IF_ERROR(
+          c->Merge(c->Dim(keys, 0), c->Dim(c->input(2), 0), &unused));
       return Status::OK();
     });
 
@@ -484,6 +482,7 @@ REGISTER_OP("InitializeTableFromTextFile")
     .Attr("value_index: int >= -2")
     .Attr("vocab_size: int >= -1 = -1")
     .Attr("delimiter: string = '\t'")
+    .Attr("offset: int = 0")
     .SetShapeFn([](InferenceContext* c) {
       ShapeHandle handle;
       TF_RETURN_IF_ERROR(c->WithRank(c->input(0), 1, &handle));
@@ -501,20 +500,11 @@ REGISTER_OP("InitializeTableFromTextFileV2")
     .Attr("value_index: int >= -2")
     .Attr("vocab_size: int >= -1 = -1")
     .Attr("delimiter: string = '\t'")
+    .Attr("offset: int = 0")
     .SetShapeFn([](InferenceContext* c) {
       ShapeHandle handle;
       TF_RETURN_IF_ERROR(c->WithRank(c->input(0), 0, &handle));
 
-      TF_RETURN_IF_ERROR(c->WithRank(c->input(1), 0, &handle));
-      return Status::OK();
-    });
-
-REGISTER_OP("InitializeTableFromDataset")
-    .Input("table_handle: resource")
-    .Input("dataset: variant")
-    .SetShapeFn([](InferenceContext* c) {
-      ShapeHandle handle;
-      TF_RETURN_IF_ERROR(c->WithRank(c->input(0), 0, &handle));
       TF_RETURN_IF_ERROR(c->WithRank(c->input(1), 0, &handle));
       return Status::OK();
     });

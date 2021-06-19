@@ -20,11 +20,11 @@ limitations under the License.
 #include <string>
 #include <vector>
 
-#include "tensorflow/lite/delegates/gpu/cl/arguments.h"
 #include "tensorflow/lite/delegates/gpu/cl/cl_context.h"
-#include "tensorflow/lite/delegates/gpu/cl/device_info.h"
 #include "tensorflow/lite/delegates/gpu/cl/gpu_object.h"
+#include "tensorflow/lite/delegates/gpu/common/gpu_info.h"
 #include "tensorflow/lite/delegates/gpu/common/status.h"
+#include "tensorflow/lite/delegates/gpu/common/task/arguments.h"
 
 namespace tflite {
 namespace gpu {
@@ -34,10 +34,10 @@ class CLArguments : public ArgumentsBinder {
  public:
   CLArguments() = default;
 
-  absl::Status Init(const DeviceInfo& device_info,
+  absl::Status Init(const GpuInfo& gpu_info,
                     const std::map<std::string, std::string>& linkables,
                     CLContext* context, Arguments* args, std::string* code);
-  absl::Status Init(const DeviceInfo& device_info, Arguments* args,
+  absl::Status Init(const GpuInfo& gpu_info, Arguments* args,
                     CLContext* context);
 
   // Temporary, will be resolved later
@@ -58,20 +58,19 @@ class CLArguments : public ArgumentsBinder {
   absl::Status SetInt(const std::string& name, int value) override;
   absl::Status SetFloat(const std::string& name, float value) override;
   absl::Status SetHalf(const std::string& name, half value) override;
-  absl::Status SetObjectRef(const std::string& name,
-                            const GPUObject* object) override;
+  absl::Status SetObjectRef(const std::string& name, const GPUObject* object);
 
   absl::Status Bind(cl_kernel kernel, int offset = 0);
 
  private:
   absl::Status AllocateObjects(const Arguments& args, CLContext* context);
-  absl::Status AddObjectArgs(Arguments* args);
+  absl::Status AddObjectArgs(const GpuInfo& gpu_info, Arguments* args);
 
   absl::Status ResolveSelectorsPass(
-      const Arguments& args,
+      const GpuInfo& gpu_info, const Arguments& args,
       const std::map<std::string, std::string>& linkables, std::string* code);
   absl::Status ResolveSelector(
-      const Arguments& args,
+      const GpuInfo& gpu_info, const Arguments& args,
       const std::map<std::string, std::string>& linkables,
       const std::string& object_name, const std::string& selector,
       const std::vector<std::string>& function_args,
@@ -150,12 +149,37 @@ class CLArguments : public ArgumentsBinder {
   std::map<std::string, HalfValue> half_values_;
   std::vector<half> shared_half4s_data_;
 
-  std::map<std::string, GPUBufferDescriptor> buffers_;
-  std::map<std::string, GPUImage2DDescriptor> images2d_;
-  std::map<std::string, GPUImage2DArrayDescriptor> image2d_arrays_;
-  std::map<std::string, GPUImage3DDescriptor> images3d_;
-  std::map<std::string, GPUImageBufferDescriptor> image_buffers_;
-  std::map<std::string, GPUCustomMemoryDescriptor> custom_memories_;
+  struct CLBufferDescriptor {
+    GPUBufferDescriptor desc;
+    cl_mem memory;
+  };
+  struct CLImage2DDescriptor {
+    GPUImage2DDescriptor desc;
+    cl_mem memory;
+  };
+  struct CLImage2DArrayDescriptor {
+    GPUImage2DArrayDescriptor desc;
+    cl_mem memory;
+  };
+  struct CLImage3DDescriptor {
+    GPUImage3DDescriptor desc;
+    cl_mem memory;
+  };
+  struct CLImageBufferDescriptor {
+    GPUImageBufferDescriptor desc;
+    cl_mem memory;
+  };
+  struct CLCustomMemoryDescriptor {
+    GPUCustomMemoryDescriptor desc;
+    cl_mem memory;
+  };
+
+  std::map<std::string, CLBufferDescriptor> buffers_;
+  std::map<std::string, CLImage2DDescriptor> images2d_;
+  std::map<std::string, CLImage2DArrayDescriptor> image2d_arrays_;
+  std::map<std::string, CLImage3DDescriptor> images3d_;
+  std::map<std::string, CLImageBufferDescriptor> image_buffers_;
+  std::map<std::string, CLCustomMemoryDescriptor> custom_memories_;
 
   std::map<std::string, GPUObjectDescriptorPtr> object_refs_;
   std::vector<GPUObjectPtr> objects_;

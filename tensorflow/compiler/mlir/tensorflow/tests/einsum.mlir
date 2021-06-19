@@ -179,3 +179,24 @@ func @batch_multilhs_einsum(%arg0: tensor<2x1x1x11xf32>, %arg1: tensor<2x11x2xf3
 // CHECK: %[[v2:.*]] = "tf.Reshape"(%[[v1]], %[[cst_1]]) : (tensor<2x1x2xf32>, tensor<4xi64>) -> tensor<2x1x1x2xf32>
 // CHECK: return %[[v2]] : tensor<2x1x1x2xf32>
 }
+
+func @einsum_no_match_on_invalid_reshape_op_1(%arg0 : tensor<?x36x32xf32>, %arg1 : tensor<?x36x?x32xf32>) -> tensor<?x36x?xf32> {
+  %0 = "tf.Einsum"(%arg0, %arg1) {device = "", equation = "bij,binj->bin"} : (tensor<?x36x32xf32>, tensor<?x36x?x32xf32>) -> tensor<?x36x?xf32>
+  return %0 : tensor<?x36x?xf32>
+// CHECK-LABEL: einsum_no_match_on_invalid_reshape_op_1
+// CHECK: "tf.Einsum"
+}
+
+func @einsum_no_match_on_invalid_reshape_op_2(%arg0 : tensor<?x36x?xf32>, %arg1 : tensor<?x36x?x32xf32>) -> tensor<?x36x32xf32> {
+  %0 = "tf.Einsum"(%arg0, %arg1) {device = "", equation = "bin,binj->bij"} : (tensor<?x36x?xf32>, tensor<?x36x?x32xf32>) -> tensor<?x36x32xf32>
+  return %0 : tensor<?x36x32xf32>
+// CHECK-LABEL: einsum_no_match_on_invalid_reshape_op_2
+// CHECK: "tf.Einsum"
+}
+
+func @einsum_ellipsis(%arg0: tensor<1x512x128xf32>, %arg1: tensor<128x256xf32>) -> tensor<1x512x256xf32> {
+  %0 = "tf.Einsum"(%arg0, %arg1) {device = "", equation = "...x,xy->...y"} : (tensor<1x512x128xf32>, tensor<128x256xf32>) -> tensor<1x512x256xf32>
+  return %0 : tensor<1x512x256xf32>
+// CHECK-LABEL: einsum_ellipsis
+// CHECK: "tf.BatchMatMulV2"(%arg0, %arg1) {adj_x = false, adj_y = false} : (tensor<1x512x128xf32>, tensor<128x256xf32>) -> tensor<1x512x256xf32>
+}

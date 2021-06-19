@@ -57,7 +57,7 @@ se::DeviceMemoryBase WrapRedzoneBestEffort(se::RedzoneAllocator* rz_allocator,
 // If violations have occurred, mark the corresponding autotune result
 // as a failure.
 void CheckRedzones(const se::RedzoneAllocator& rz_allocator,
-                   tensorflow::AutotuneResult* autotune_result);
+                   AutotuneResult* autotune_result);
 
 template <typename T>
 inline se::DeviceMemory<T> AsDeviceMemory(const T* cuda_memory, uint64 size) {
@@ -151,6 +151,7 @@ class AutoTuneMap {
     int min_warmup_iterations = 10;
     const char* threshold_str = getenv("TF_AUTOTUNE_THRESHOLD");
     if (threshold_str != nullptr) {
+      VLOG(1) << "TF_AUTOTUNE_THRESHOLD = " << threshold_str;
       strings::safe_strto32(threshold_str, &min_score_threshold_);
     }
     const char* min_warmup_iteration_str =
@@ -239,41 +240,13 @@ void LogFusedConvForwardAutotuneResults(
 
 // Returns the best algorithms for the config, one is the fastest, the other is
 // other is fastest with 0 scratch space. Unsuccessful autotuning results are
-// allowed and ignored.
-Status BestCudnnConvAlgorithm(absl::Span<const AutotuneResult> results,
-                              se::dnn::AlgorithmConfig* algo);
+// allowed and ignored. The "plans" can be null when Cudnn frontend APIs are not
+// used.
+Status BestCudnnConvAlgorithm(
+    absl::Span<const AutotuneResult> results,
+    std::vector<std::unique_ptr<se::dnn::ConvolveExecutionPlan>>* plans,
+    se::dnn::AlgorithmConfig* algo);
 
-namespace gpu_utils {
-// Get a workspace limit from the environment variable, which is in MB.
-// Return the workspace memory limit in bytes. If no value is set, return the
-// default value.
-int64 GetWorkspaceLimit(const string& envvar_in_mb,
-                        int64 default_value_in_bytes);
-}  // namespace gpu_utils
-
-// A class to provide scratch-space allocator for Stream-Executor callbacks in
-// CUDA libraries (CUDNN etc.).
-// TensorFlow is responsible for releasing the temporary buffers after
-// the kernel finishes.
-class GpuScratchAllocator : public se::ScratchAllocator {
- public:
-  virtual ~GpuScratchAllocator() {}
-
-  GpuScratchAllocator(int64 memory_limit, OpKernelContext* context);
-
-  int64 GetMemoryLimitInBytes() override { return memory_limit_; }
-
-  se::port::StatusOr<se::DeviceMemory<uint8>> AllocateBytes(
-      int64 byte_size) override;
-
-  int64 TotalByteSize() { return total_byte_size_; }
-
- private:
-  int64 memory_limit_;
-  int64 total_byte_size_;
-  OpKernelContext* context_;
-  std::vector<Tensor> allocated_tensors_;
-};
 }  // namespace tensorflow
 
 #endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM

@@ -136,13 +136,13 @@ struct DividesBy<float, Eigen::half> {
 
 struct HalfToFloat {
   __host__ __device__ float operator()(const Eigen::half& x) const {
-    return Eigen::half_impl::half_to_float(x);
+    return static_cast<float>(x);
   }
 };
 
 struct FloatToHalf {
   __host__ __device__ Eigen::half operator()(const float& x) const {
-    return Eigen::half_impl::float_to_half_rtne(x);
+    return static_cast<Eigen::half>(x);
   }
 };
 
@@ -387,7 +387,7 @@ __global__ __launch_bounds__(1024) void ColumnReduceKernel(
     //  -         =
     //            =
     const int numRowsThisBlock =
-        min(blockDim.y, num_rows - blockIdx.y * blockDim.y);
+        min(static_cast<int>(blockDim.y), num_rows - blockIdx.y * blockDim.y);
 
     for (int row = 1; row < numRowsThisBlock; ++row) {
       value_type t = partial_sums[threadIdx.x * (TF_RED_WARPSIZE + 1) + row];

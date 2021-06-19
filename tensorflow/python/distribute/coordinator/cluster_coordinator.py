@@ -23,20 +23,18 @@ from __future__ import division
 from __future__ import print_function
 
 import contextlib
-import enum
 import functools
 import os
 import re
-import sys
 import threading
 import time
 import weakref
 from six.moves import queue
 
-from tensorflow.python.data.ops import iterator_ops
 from tensorflow.python.distribute import input_lib
 from tensorflow.python.distribute import parameter_server_strategy_v2
 from tensorflow.python.distribute.coordinator import metric_utils
+from tensorflow.python.distribute.coordinator import values as values_lib
 from tensorflow.python.eager import cancellation
 from tensorflow.python.eager import context
 from tensorflow.python.eager import def_function
@@ -45,7 +43,6 @@ from tensorflow.python.eager import function as tf_function
 from tensorflow.python.framework import errors
 from tensorflow.python.framework import func_graph
 from tensorflow.python.framework import ops
-from tensorflow.python.ops import variable_scope
 from tensorflow.python.platform import tf_logging as logging
 from tensorflow.python.util import nest
 from tensorflow.python.util.tf_export import tf_export
@@ -70,162 +67,12 @@ _RPC_ERROR_FROM_PS = "GRPC error information from remote target /job:ps"
 _JOB_WORKER_STRING_IDENTIFIER = "/job:worker"
 
 
-class _RemoteValueStatus(enum.Enum):
-  """The status of a `RemoteValue` object.
-
-  A `RemoteValue` object can have three states:
-    1) not ready: no value, no non-retryable error and not aborted;
-    2) aborted: i.e. the execution of function was aborted because of task
-       failure, but can be retried;
-    3) ready: i.e. has value or has non-tryable error;
-
-  The initial state of a `RemoteValue` is "not ready". When its corresponding
-  closure has
-  been executed at least once, it will become aborted or ready. The state
-  transitions are:
-    1) not ready -> 2) aborted:
-      when the corresponding closure is aborted due to worker failure, and the
-      worker failure is not immediately handled.
-    1) not ready -> 3) ready:
-      when the corresponding closure has been executed successfully.
-    2) aborted -> 3) ready:
-      when the `RemoteValue` is rebuilt by rerunning the corresponding closure
-      and the closure has been executed successfully.
-    3) ready -> 2) aborted:
-      when the corresponding closure had been executed successfully but later
-      the corresponding remote worker failed. This is currently only implemented
-      for resource `RemoteValue` like iterators.
-  """
-  NOT_READY = "NOT_READY"
-  ABORTED = "ABORTED"
-  READY = "READY"
-
-
-@tf_export("distribute.experimental.coordinator.RemoteValue", v1=[])
-class RemoteValue(object):
-  """An asynchronously available value of a scheduled function.
-
-  This class is used as the return value of
-  `tf.distribute.experimental.coordinator.ClusterCoordinator.schedule` where
-  the underlying value becomes available at a later time once the function has
-  been executed.
-
-  Using `tf.distribute.experimental.coordinator.RemoteValue` as an input to
-  a subsequent function scheduled with
-  `tf.distribute.experimental.coordinator.ClusterCoordinator.schedule` is
-  currently not supported.
-
-  Example:
-
-  ```python
-  strategy = tf.distribute.experimental.ParameterServerStrategy(
-      cluster_resolver=...)
-  coordinator = (
-      tf.distribute.experimental.coordinator.ClusterCoordinator(strategy))
-
-  with strategy.scope():
-    v1 = tf.Variable(initial_value=0.0)
-    v2 = tf.Variable(initial_value=1.0)
-
-  @tf.function
-  def worker_fn():
-    v1.assign_add(0.1)
-    v2.assign_sub(0.2)
-    return v1.read_value() / v2.read_value()
-
-  result = coordinator.schedule(worker_fn)
-  # Note that `fetch()` gives the actual result instead of a `tf.Tensor`.
-  assert result.fetch() == 0.125
-
-  for _ in range(10):
-    # `worker_fn` will be run on arbitrary workers that are available. The
-    # `result` value will be available later.
-    result = coordinator.schedule(worker_fn)
-  ```
-  """
-
-  def fetch(self):
-    """Wait for the result of `RemoteValue` to be ready and return the result.
-
-    This makes the value concrete by copying the remote value to local.
-
-    Returns:
-      The actual output of the `tf.function` associated with this `RemoteValue`,
-      previously by a
-      `tf.distribute.experimental.coordinator.ClusterCoordinator.schedule` call.
-      This can be a single value, or a structure of values, depending on the
-      output of the `tf.function`.
-
-    Raises:
-      tf.errors.CancelledError: If the function that produces this `RemoteValue`
-        is aborted or cancelled due to failure.
-    """
-    raise NotImplementedError("Must be implemented in subclasses.")
-
-
-class RemoteValueImpl(RemoteValue):
-  """Implementation of `RemoteValue`."""
-
-  def __init__(self, closure, type_spec):  # pylint: disable=super-init-not-called
-    """Initializes a `RemoteValueImpl`.
-
-    Args:
-      closure: The closure from which the `RemoteValue` is created.
-      type_spec: The type spec for this `RemoteValue` which is used to trace
-        functions that take this `RemoteValue` as input.
-    """
-    self._closure = closure
-    self._type_spec = type_spec
-    self._value = None
-    self._error = None
-    self._status_available_event = threading.Event()
-    self._status = _RemoteValueStatus.NOT_READY
-
-  def _set_aborted(self):
-    self._status = _RemoteValueStatus.ABORTED
-    self._value = None
-    self._error = None
-
-    # Wake up any waiting thread and clear the event.
-    self._status_available_event.set()
-
-  def _rebuild_on(self, worker):
-    self._status_available_event.clear()
-    # TODO(yuefengz): we may need to rebuild its inputs as well.
-    self._closure.execute_on(worker)
-
-  def _set_value(self, value):
-    self._status = _RemoteValueStatus.READY
-    self._value = value
-    self._error = None
-    self._status_available_event.set()
-
-  def _set_error(self, exception):
-    self._status = _RemoteValueStatus.READY
-    self._value = None
-    self._error = exception
-    self._status_available_event.set()
-
-  def _get_value(self):
-    self._status_available_event.wait()
-    return self._value
-
-  def _get_error(self):
-    self._status_available_event.wait()
-    return self._error
-
-  def fetch(self):
-    self._status_available_event.wait()
-    if self._status is _RemoteValueStatus.ABORTED:
-      raise errors.CancelledError(
-          None, None,
-          "The corresponding function is aborted. Please reschedule the "
-          "function.")
-    if self._error is not None:
-      raise self._error  # pylint: disable=raising-bad-type
-    else:
-      return nest.map_structure(
-          lambda x: x.numpy() if hasattr(x, "numpy") else x, self._value)
+RemoteValueStatus = values_lib.RemoteValueStatus
+RemoteValue = values_lib.RemoteValue
+RemoteValueImpl = values_lib.RemoteValueImpl
+PerWorkerValues = values_lib.PerWorkerValues
+PerWorkerDistributedDataset = values_lib.PerWorkerDistributedDataset
+PerWorkerDistributedIterator = values_lib.PerWorkerDistributedIterator
 
 
 class InputError(Exception):
@@ -243,7 +90,7 @@ def _maybe_rebuild_remote_values(worker, structure):
 
   def _get_error(val):
     if isinstance(val, RemoteValue):
-      if val._status is _RemoteValueStatus.ABORTED:  # pylint: disable=protected-access
+      if val._status is RemoteValueStatus.ABORTED:  # pylint: disable=protected-access
         try:
           with worker.failure_handler.wait_on_failure(
               on_recovery_fn=functools.partial(val._rebuild_on, worker),  # pylint: disable=protected-access
@@ -271,41 +118,19 @@ def _maybe_get_remote_value(val):
       raise AssertionError(
           "RemoteValue doesn't have a value because it has errors.")
     else:
-      return val._get_value()  # pylint: disable=protected-access
+      return val._get_values()  # pylint: disable=protected-access
   else:
     return val
 
 
 def _maybe_as_type_spec(val):
-  if isinstance(val, RemoteValue):
+  if isinstance(val, (RemoteValue, PerWorkerValues)):
     if val._type_spec is None:  # pylint: disable=protected-access
       raise ValueError("Output of a scheduled function that is not "
                        "tf.function cannot be the input of another function.")
     return val._type_spec  # pylint: disable=protected-access
   else:
     return val
-
-
-@tf_export("distribute.experimental.coordinator.PerWorkerValues", v1=[])
-class PerWorkerValues(object):
-  """A container that holds a list of values, one value per worker.
-
-  `tf.distribute.experimental.coordinator.PerWorkerValues` contains a collection
-  of values, where each of the value is located one worker respectively, and
-  upon being used as one of the `args` or `kwargs` of
-  `tf.distribute.experimental.coordinator.ClusterCoordinator.schedule()`, the
-  value specific to a worker will be passed into the function being executed at
-  that particular worker.
-
-  Currently, the only supported path to create an object of
-  `tf.distribute.experimental.coordinator.PerWorkerValues` is through calling
-  `iter` on a `ClusterCoordinator.create_per_worker_dataset`-returned
-  distributed dataset instance. The mechanism to create a custom
-  `tf.distribute.experimental.coordinator.PerWorkerValues` is not yet supported.
-  """
-
-  def __init__(self, values):
-    self._values = tuple(values)
 
 
 def _select_worker_slice(worker_id, structured):
@@ -406,10 +231,10 @@ class Closure(object):
     with ops.device(worker.device_name):
       with context.executor_scope(worker.executor):
         with metric_utils.monitored_timer("closure_execution"):
-          output_value = self._function(
+          output_values = self._function(
               *nest.map_structure(_maybe_get_remote_value, replica_args),
               **nest.map_structure(_maybe_get_remote_value, replica_kwargs))
-    self.output_remote_value._set_value(output_value)  # pylint: disable=protected-access
+    self.output_remote_value._set_values(output_values)  # pylint: disable=protected-access
 
 
 class _CoordinatedClosureQueue(object):
@@ -433,6 +258,7 @@ class _CoordinatedClosureQueue(object):
 
     # Condition indicating that an item becomes available in queue (not empty).
     self._closures_queued_condition = threading.Condition(self._queue_lock)
+    self._should_process_closures = True
 
     # Condition indicating that a queue slot becomes available (not full).
     # Note that even with "infinite" queue size, there is still a "practical"
@@ -465,6 +291,11 @@ class _CoordinatedClosureQueue(object):
     # We don't use a reader/writer's lock on purpose to reduce the complexity
     # of the code.
     self._put_wait_lock = threading.Lock()
+
+  def stop(self):
+    with self._queue_lock:
+      self._should_process_closures = False
+      self._closures_queued_condition.notifyAll()
 
   def _cancel_all_closures(self):
     """Clears the queue and sets remaining closures cancelled error.
@@ -525,9 +356,11 @@ class _CoordinatedClosureQueue(object):
   def get(self, timeout=None):
     """Return a closure from the queue to be executed."""
     with self._queue_lock:
-      while self._queue.empty():
+      while self._queue.empty() and self._should_process_closures:
         if not self._closures_queued_condition.wait(timeout=timeout):
           return None
+      if not self._should_process_closures:
+        return None
       closure = self._queue.get(block=False)
       self._queue_free_slot_condition.notify()
       self._inflight_closure_count += 1
@@ -611,15 +444,32 @@ class WorkerPreemptionHandler(object):
     self._server_def = server_def
     self._cluster = cluster
     self._cluster_update_lock = threading.Lock()
-    self._cluster_due_for_update = threading.Event()
+    self._cluster_due_for_update_or_finish = threading.Event()
     self._worker_up_cond = threading.Condition(self._cluster_update_lock)
-    threading.Thread(target=self._preemption_handler,
-                     name="WorkerPreemptionHandler",
-                     daemon=True).start()
+    self._error_from_recovery = None
+    self._should_preemption_thread_run = True
+    self._preemption_handler_thread = threading.Thread(
+        target=self._preemption_handler,
+        name="WorkerPreemptionHandler",
+        daemon=True)
+    self._preemption_handler_thread.start()
+
+  def stop(self):
+    """Ensure the worker preemption thread is closed."""
+    self._should_preemption_thread_run = False
+    with self._cluster_update_lock:
+      self._cluster_due_for_update_or_finish.set()
+    # TODO(yuefengz): The preemption handler thread shouldn't be terminated
+    # asynchronously since it touches eager context which is a process-wide
+    # singleton. The problem is in OSS unit tests will time out.
 
   def _validate_preemption_failure(self, e):
     """Validates that the given exception represents worker preemption."""
-    if _is_worker_failure(e):
+
+    # Only categorize the failure as a worker preemption if the cancellation
+    # manager did not attempt to cancel the blocking operations.
+    if _is_worker_failure(e) and (
+        not self._cluster._closure_queue._cancellation_mgr.is_cancelled):  # pylint: disable=protected-access
       return
     raise e
 
@@ -640,6 +490,7 @@ class WorkerPreemptionHandler(object):
     Yields:
       None.
     """
+    assert self._should_preemption_thread_run
     try:
       yield
     except errors.OpError as e:
@@ -650,14 +501,38 @@ class WorkerPreemptionHandler(object):
           on_failure_fn()
         return
 
+      # Ignoring derived CancelledErrors to tolerate transient failures in
+      # PS-worker communication, which initially exposed as an UnavailableError
+      # and then lead to sub-function cancellation, subsequently getting
+      # reported from worker to chief as CancelledError.
+      # We do not mark either worker or PS as failed due to only CancelledError.
+      # If there are real (non-transient) failures, they must also be reported
+      # as other errors (UnavailableError most likely) in closure executions.
+      if isinstance(e, errors.CancelledError):
+        logging.error(
+            "Remote function on worker %s failed with %r:%s\n"
+            "This derived error is ignored and not reported to users.",
+            worker_device_name, e, e)
+        if on_failure_fn:
+          on_failure_fn()
+        return
+
       self._validate_preemption_failure(e)
-      logging.error("Worker %s failed with error: %s", worker_device_name, e)
+      logging.error("Worker %s failed with %r:%s", worker_device_name, e, e)
       if on_failure_fn:
         on_failure_fn()
 
       with self._cluster_update_lock:
-        self._cluster_due_for_update.set()
+        self._cluster_due_for_update_or_finish.set()
         self._worker_up_cond.wait(_WORKER_MAXIMUM_RECOVERY_SEC)
+        if self._error_from_recovery:
+          # TODO(yuefengz): there is only one worker that will get this error.
+          # Ideally we shuold let all workers notified by `_worker_up_cond` get
+          # this error.
+          try:
+            raise self._error_from_recovery
+          finally:
+            self._error_from_recovery = None
         logging.info("Worker %s has been recovered.", worker_device_name)
 
       if on_recovery_fn:
@@ -673,8 +548,13 @@ class WorkerPreemptionHandler(object):
     it waits until all workers are back and updates the cluster about the
     restarted workers.
     """
+    assert self._should_preemption_thread_run
     while True:
-      self._cluster_due_for_update.wait()
+      self._cluster_due_for_update_or_finish.wait()
+      if not self._should_preemption_thread_run:
+        logging.info("Stopping the failure handing thread.")
+        break
+
       with self._cluster_update_lock:
         try:
           # TODO(haoyuzhang): support partial cluster recovery
@@ -685,9 +565,20 @@ class WorkerPreemptionHandler(object):
           # all workers that they are recovered from failure.
           logging.info("Cluster successfully recovered.")
           self._worker_up_cond.notify_all()
-          self._cluster_due_for_update.clear()
+          # The check for _should_preemption_thread_run is necessary since the
+          # `stop` may have already set _cluster_due_for_update_or_finish.
+          if self._should_preemption_thread_run:
+            self._cluster_due_for_update_or_finish.clear()
         except Exception as e:  # pylint: disable=broad-except
-          self._validate_preemption_failure(e)
+          try:
+            self._validate_preemption_failure(e)
+          except Exception as ps_e:  # pylint: disable=broad-except
+            # In this case, a parameter server fails. So we raise this error to
+            # the caller of `wait_on_failure`.
+            self._error_from_recovery = ps_e
+            self._worker_up_cond.notify_all()
+            if self._should_preemption_thread_run:
+              self._cluster_due_for_update_or_finish.clear()
           # NOTE: Since the first RPC (GetStatus) of update_server_def is
           # currently blocking by default, error should only happen if:
           # (1) More workers failed while waiting for the previous workers to
@@ -717,11 +608,16 @@ class Worker(object):
     self.failure_handler = cluster.failure_handler
     self._cluster = cluster
     self._resource_remote_value_refs = []
+    self._should_worker_thread_run = True
 
     # Worker threads need to start after `Worker`'s initialization.
     threading.Thread(target=self._process_queue,
                      name="WorkerClosureProcessingLoop-%d" % self.worker_index,
                      daemon=True).start()
+
+  def stop(self):
+    """Ensure the worker thread is closed."""
+    self._should_worker_thread_run = False
 
   def _set_resources_aborted(self):
     # TODO(yuefengz): maybe we can query whether a tensor is valid or not
@@ -736,6 +632,7 @@ class Worker(object):
 
   def _process_closure(self, closure):
     """Runs a closure with preemption handling."""
+    assert closure is not None
     try:
       with self._cluster.failure_handler.wait_on_failure(
           on_failure_fn=lambda: self._cluster._closure_queue.put_back(closure),  # pylint: disable=protected-access
@@ -772,11 +669,20 @@ class Worker(object):
     time.sleep(delay_secs)
 
   def _process_queue(self):
-    """Function running in a thread to process closure queues."""
+    """Function running in a worker thread to process closure queues."""
     self._maybe_delay()
-    while True:
+    while self._should_worker_thread_run:
       closure = self._cluster._closure_queue.get()  # pylint: disable=protected-access
+      if not self._should_worker_thread_run or closure is None:
+        return
       self._process_closure(closure)
+      # To properly stop the worker and preemption threads, it is important that
+      # `ClusterCoordinator` object is not held onto so its `__del__` can be
+      # called. By removing the reference to the `closure` that has already been
+      # processed, we ensure that the `closure` object is released, while
+      # getting the next `closure` at above `self._cluster._closure_queue.get()`
+      # call.
+      del closure
 
   def _create_resource(self, function, args=None, kwargs=None):
     """Synchronously creates a per-worker resource represented by a `RemoteValue`.
@@ -869,6 +775,14 @@ class Cluster(object):
         Worker(i, w, self) for i, w in enumerate(worker_device_strings)
     ]
 
+  def stop(self):
+    """Stop worker, worker preemption threads, and the closure queue."""
+    self.failure_handler.stop()
+
+    for worker in self.workers:
+      worker.stop()
+    self._closure_queue.stop()
+
   def _record_and_ignore_transient_ps_failure(self, e):
     """Records potential PS failures and return if failure should be ignored."""
     if self._transient_ps_failures_threshold <= 0 or not _is_ps_failure(e):
@@ -948,14 +862,13 @@ class ClusterCoordinator(object):
   failed worker, it will be added for function execution after datasets created
   by `create_per_worker_dataset` are re-built on it.
 
-  When a parameter server the coordinator fails, a
-  `tf.errors.UnavailableError` is raised by `schedule`, `join` or `done`. In
-  this case, in addition to bringing back the failed parameter server, users
-  should restart the coordinator to so that it reconnects to the parameter
-  server, re-creates the variables and loads checkpoints. If the coordinator
-  fails, users need to bring it back as well. The program will automatically
-  connect to the parameter servers and workers, and continue the progress from a
-  checkpoint.
+  When a parameter server fails, a `tf.errors.UnavailableError` is raised by
+  `schedule`, `join` or `done`. In this case, in addition to bringing back the
+  failed parameter server, users should restart the coordinator so that it
+  reconnects to workers and parameter servers, re-creates the variables, and
+  loads checkpoints. If the coordinator fails, after the user brings it back,
+  the program will automatically connect to workers and parameter servers, and
+  continue the progress from a checkpoint.
 
   It is thus essential that in user's program, a checkpoint file is periodically
   saved, and restored at the start of the program. If an
@@ -970,6 +883,14 @@ class ClusterCoordinator(object):
   This is currently under development, and the API as well as implementation
   are subject to changes.
   """
+
+  def __new__(cls, strategy):
+    # `ClusterCoordinator` is kept as a single instance to a given `Strategy`.
+    # TODO(rchao): Needs a lock for thread-safety
+    if strategy._cluster_coordinator is None:
+      strategy._cluster_coordinator = super(
+          ClusterCoordinator, cls).__new__(cls)
+    return strategy._cluster_coordinator
 
   def __init__(self, strategy):
     """Initialization of a `ClusterCoordinator` instance.
@@ -989,7 +910,11 @@ class ClusterCoordinator(object):
           "`tf.distribute.experimental.coordinator.ClusterCoordinator` "
           "currently.")
     self._strategy = strategy
-    self.cluster = Cluster(strategy)
+    self.strategy.extended._used_with_coordinator = True
+    self._cluster = Cluster(strategy)
+
+  def __del__(self):
+    self._cluster.stop()
 
   @property
   def strategy(self):
@@ -1002,7 +927,7 @@ class ClusterCoordinator(object):
     This method is non-blocking in that it queues the `fn` which will be
     executed later and returns a
     `tf.distribute.experimental.coordinator.RemoteValue` object immediately.
-    `fetch` can be called on the it to wait for the function execution to finish
+    `fetch` can be called on it to wait for the function execution to finish
     and retrieve its output from a remote worker. On the other hand, call
     `tf.distribute.experimental.coordinator.ClusterCoordinator.join` to wait for
     all scheduled functions to finish.
@@ -1040,7 +965,8 @@ class ClusterCoordinator(object):
 
     Args:
       fn: A `tf.function`; the function to be dispatched to a worker for
-        execution asynchronously.
+        execution asynchronously. Regular python funtion is not supported to be
+        scheduled.
       args: Positional arguments for `fn`.
       kwargs: Keyword arguments for `fn`.
 
@@ -1053,10 +979,18 @@ class ClusterCoordinator(object):
         previously scheduled function, since the last time an error was thrown
         or since the beginning of the program.
     """
+    if not isinstance(fn,
+                      (def_function.Function, tf_function.ConcreteFunction)):
+      raise TypeError(
+          "`tf.distribute.experimental.coordinator.ClusterCoordinator.schedule`"
+          " only accepts a `tf.function` or a concrete function.")
     # Slot variables are usually created during function tracing time; thus
     # `schedule` needs to be called within the `strategy.scope()`.
     with self.strategy.scope():
-      return self.cluster.schedule(fn, args=args, kwargs=kwargs)
+      self.strategy.extended._being_scheduled = True  # pylint: disable=protected-access
+      remote_value = self._cluster.schedule(fn, args=args, kwargs=kwargs)
+      self.strategy.extended._being_scheduled = False  # pylint: disable=protected-access
+      return remote_value
 
   def join(self):
     """Blocks until all the scheduled functions have finished execution.
@@ -1077,7 +1011,7 @@ class ClusterCoordinator(object):
         previously scheduled function since the last time an error was thrown or
         since the beginning of the program.
     """
-    self.cluster.join()
+    self._cluster.join()
 
   def done(self):
     """Returns whether all the scheduled functions have finished execution.
@@ -1095,7 +1029,7 @@ class ClusterCoordinator(object):
         previously scheduled function since the last time an error was thrown or
         since the beginning of the program.
     """
-    return self.cluster.done()
+    return self._cluster.done()
 
   def create_per_worker_dataset(self, dataset_fn):
     """Create dataset on workers by calling `dataset_fn` on worker devices.
@@ -1137,7 +1071,7 @@ class ClusterCoordinator(object):
 
     def per_worker_dataset_fn():
       return strategy.distribute_datasets_from_function(
-          lambda x: tf.data.from_tensor_slices([3] * 3)
+          lambda x: tf.data.Dataset.from_tensor_slices([3] * 3))
 
     per_worker_dataset = coordinator.create_per_worker_dataset(
         per_worker_dataset_fn)
@@ -1145,6 +1079,9 @@ class ClusterCoordinator(object):
     remote_value = coordinator.schedule(worker_fn, args=(per_worker_iter,))
     assert remote_value.fetch() == 3
     ```
+
+    NOTE: A known limitation is `tf.data.Options` is ignored in dataset created
+    by `create_per_worker_dataset`.
 
     Args:
       dataset_fn: The dataset function that returns a dataset. This is to be
@@ -1156,11 +1093,11 @@ class ClusterCoordinator(object):
       a `tf.distribute.experimental.coordinator.PerWorkerValues` of the
       iterators (that are on the workers).
     """
-    input_workers = input_lib.InputWorkers([
-        (w.device_name, [w.device_name]) for w in self.cluster.workers
-    ])
+    input_workers = input_lib.InputWorkers(
+        [(w.device_name, [w.device_name]) for w in self._cluster.workers],
+        False)
 
-    return _PerWorkerDistributedDataset(dataset_fn, input_workers, self)
+    return PerWorkerDistributedDataset(dataset_fn, input_workers, self)
 
   def _create_per_worker_resources(self, fn, args=None, kwargs=None):
     """Synchronously create resources on the workers.
@@ -1180,7 +1117,7 @@ class ClusterCoordinator(object):
       objects.
     """
     results = []
-    for w in self.cluster.workers:
+    for w in self._cluster.workers:
       results.append(w._create_resource(fn, args=args, kwargs=kwargs))  # pylint: disable=protected-access
     return PerWorkerValues(tuple(results))
 
@@ -1243,91 +1180,6 @@ class ClusterCoordinator(object):
     return nest.map_structure(_maybe_fetch, val)
 
 
-# pylint: disable=missing-function-docstring
-@contextlib.contextmanager
-def handle_parameter_server_failure():
-  try:
-    yield
-  except errors.UnavailableError as e:  # pylint: disable=broad-except
-    restart_exit_code = os.environ.get("TF_CLIENT_NON_FATAL_RESTART_EXIT_CODE",
-                                       None)
-    if restart_exit_code is not None:
-      sys.exit(int(restart_exit_code))
-    else:
-      raise
-
-
-class _PerWorkerDistributedDataset(object):
-  """Represents worker-distributed datasets created from dataset function."""
-
-  def __init__(self, dataset_fn, input_workers, coordinator):
-    """Makes an iterable from datasets created by the given function.
-
-    Args:
-      dataset_fn: A function that returns a `Dataset`.
-      input_workers: an `InputWorkers` object.
-      coordinator: a `ClusterCoordinator` object, used to create dataset
-        resources.
-    """
-    def disallow_variable_creation(next_creator, **kwargs):
-      raise ValueError("Creating variables in `dataset_fn` is not allowed.")
-
-    if isinstance(dataset_fn, def_function.Function):
-      with variable_scope.variable_creator_scope(disallow_variable_creation):
-        dataset_fn = dataset_fn.get_concrete_function()
-    elif not isinstance(dataset_fn, tf_function.ConcreteFunction):
-      with variable_scope.variable_creator_scope(disallow_variable_creation):
-        dataset_fn = def_function.function(dataset_fn).get_concrete_function()
-    self._dataset_fn = dataset_fn
-    self._input_workers = input_workers
-    self._coordinator = coordinator
-    self._element_spec = None
-
-  def __iter__(self):
-    # We would like users to create iterators outside `tf.function`s so that we
-    # can track them.
-    if (not context.executing_eagerly() or
-        ops.get_default_graph().building_function):
-      raise RuntimeError(
-          "__iter__() is not supported inside of tf.function or in graph mode.")
-
-    def _create_per_worker_iterator():
-      dataset = self._dataset_fn()
-      return iter(dataset)
-
-    # If _PerWorkerDistributedDataset.__iter__ is called multiple
-    # times, for the same object it should only create and register resource
-    # once. Using object id to distinguish different iterator resources.
-    per_worker_iterator = self._coordinator._create_per_worker_resources(
-        _create_per_worker_iterator)
-
-    # Setting type_spec of each RemoteValue so that functions taking these
-    # RemoteValues as inputs can be traced.
-    for iterator_remote_value in per_worker_iterator._values:
-      iterator_remote_value._type_spec = (  # pylint: disable=protected-access
-          iterator_ops.IteratorSpec(
-              self._dataset_fn.structured_outputs.element_spec))
-    return _PerWorkerDistributedIterator(per_worker_iterator._values)
-
-  @property
-  def element_spec(self):
-    """The type specification of an element of this dataset."""
-    raise NotImplementedError("Passing `AsyncDistributedDataset` to a "
-                              "tf.function is not supported.")
-
-
-class _PerWorkerDistributedIterator(PerWorkerValues):
-  """Distributed iterator for `ClusterCoordinator`."""
-
-  def __next__(self):
-    return self.get_next()
-
-  def get_next(self, name=None):
-    """Returns the next input from the iterator for all replicas."""
-    raise NotImplementedError("Iterating over an `AsyncDistributedIterator` "
-                              "is not supported right now.")
-
-
 def _extract_failed_ps_instances(err_msg):
   """Return a set of potentially failing ps instances from error message."""
   tasks = re.findall("/job:ps/replica:0/task:[0-9]+", err_msg)
@@ -1372,8 +1224,10 @@ def _is_worker_failure(error):
         "registered" in str(error)):
       return True
 
-  # This could happen when the iterator is no longer valid on the remote worker
-  # "Resource input tensor contains an invalid device"
+  # NOTE(b/179061495): During worker preemptions, if multiple functions are
+  # running concurrently (especially with subfunctions spanning chief/PS),
+  # CancelledError can be returned due to chief/PS cancelling outstanding RPCs
+  # to the failing workers.
   if isinstance(error, errors.CancelledError):
     return True
 

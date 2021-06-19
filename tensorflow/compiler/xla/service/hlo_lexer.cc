@@ -281,6 +281,7 @@ TokKind HloLexer::LexIdentifier() {
   KEYWORD(ROOT);
   KEYWORD(maximal);
   KEYWORD(replicated);
+  KEYWORD(manual);
   KEYWORD(last_tile_dim_replicate);
 
 #undef KEYWORD
@@ -289,7 +290,7 @@ TokKind HloLexer::LexIdentifier() {
     absl::string_view consumable =
         StringPieceFromPointers(token_state_.token_start, buf_.end());
     static LazyRE2 dim_labels_pattern = {
-        R"([0-9bf]{2,}_[0-9io]{2,}->[0-9bf]{2,})"};
+        R"([0-9bf?]{2,}_[0-9io?]{2,}->[0-9bf?]{2,})"};
     if (RE2::Consume(&consumable, *dim_labels_pattern)) {
       current_ptr_ = consumable.begin();
       token_state_.str_val.assign(token_state_.token_start, current_ptr_);
@@ -502,6 +503,8 @@ string TokKindToString(TokKind kind) {
       return "kw_maximal";
     case TokKind::kw_replicated:
       return "kw_replicated";
+    case TokKind::kw_manual:
+      return "kw_manual";
     case TokKind::kw_last_tile_dim_replicate:
       return "kw_last_tile_dim_replicate";
     case TokKind::kw_nan:

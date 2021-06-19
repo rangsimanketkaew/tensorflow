@@ -5,7 +5,7 @@ load("//tensorflow:tensorflow.bzl", "tf_py_test")
 
 package(
     default_visibility = ["//tensorflow:internal"],
-    licenses = ["notice"],  # Apache 2.0
+    licenses = ["notice"],
 )
 
 # CPU only tests should use tf_py_test, GPU tests use cuda_py_test
@@ -15,6 +15,7 @@ package(
 py_library(
     name = "util",
     srcs = ["util.py"],
+    srcs_version = "PY3",
     deps = [
         "//third_party/py/numpy",
     ],
@@ -125,6 +126,9 @@ cuda_py_test(
     size = "medium",
     srcs = ["stateless_random_ops_test.py"],
     shard_count = 10,
+    xla_tags = [
+        "no_cuda_asan",  # times-out
+    ],
     deps = [
         "//tensorflow/python:array_ops",
         "//tensorflow/python:client_testlib",
@@ -142,6 +146,9 @@ cuda_py_test(
     srcs = ["random_gamma_test.py"],
     shard_count = 4,
     tags = ["nozapfhahn"],
+    xla_tags = [
+        "no_cuda_asan",  # times out
+    ],
     deps = [
         ":util",
         "//tensorflow/python:array_ops",
